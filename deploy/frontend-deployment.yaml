@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simulator-frontend
+  namespace: simulator
+  labels:
+    app: simulator-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simulator-frontend
+  template:
+    metadata:
+      labels:
+        app: simulator-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: YOUR_REGISTRY/simulator-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NEXT_PUBLIC_API_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: simulator-config
+                  key: BACKEND_BASE_URL
+            - name: NEXT_PUBLIC_GRAFANA_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: simulator-config
+                  key: GRAFANA_URL
+

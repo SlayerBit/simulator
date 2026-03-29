@@ -1,0 +1,148 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+  engineType = "binary"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  role      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  simulations Simulation[] @relation("UserSimulations")
+  auditLogs   AuditLog[]
+}
+
+model Simulation {
+  id               String     @id @default(cuid())
+  name             String
+  failureType      String
+  state            String
+  namespace        String
+  targetService    String?
+  targetDeployment String?
+  targetPod        String?
+  labelSelector    String?
+  intensity        String?
+  durationSeconds  Int
+  dryRun           Boolean   @default(false)
+  createdAt        DateTime  @default(now())
+  startedAt        DateTime?
+  completedAt      DateTime?
+
+  createdById String
+  createdBy   User        @relation("UserSimulations", fields: [createdById], references: [id])
+
+  steps           SimulationStep[]
+  failureEvents   FailureEvent[]
+  recoveryActions RecoveryAction[]
+  reports         Report[]
+}
+
+model SimulationStep {
+  id           String     @id @default(cuid())
+  simulation   Simulation @relation(fields: [simulationId], references: [id])
+  simulationId String
+  order        Int
+  name         String
+  failureType  String
+  parallelGroup String?
+  createdAt    DateTime  @default(now())
+}
+
+model FailureEvent {
+  id           String     @id @default(cuid())
+  simulation   Simulation @relation(fields: [simulationId], references: [id])
+  simulationId String
+  method       String
+  state        String
+  startedAt    DateTime   @default(now())
+  endedAt      DateTime?
+  errorMessage String?
+}
+
+model RecoveryAction {
+  id           String     @id @default(cuid())
+  simulation   Simulation @relation(fields: [simulationId], references: [id])
+  simulationId String
+  description  String
+  startedAt    DateTime   @default(now())
+  completedAt  DateTime?
+  success      Boolean
+  errorMessage String?
+}
+
+model AuditLog {
+  id           String   @id @default(cuid())
+  user         User?    @relation(fields: [userId], references: [id])
+  userId       String?
+  action       String
+  simulationId String?
+  createdAt    DateTime @default(now())
+  metadata     Json?
+}
+
+model Report {
+  id                 String     @id @default(cuid())
+  simulation         Simulation @relation(fields: [simulationId], references: [id])
+  simulationId       String
+  summary            String
+  result             String
+  failureType        String
+  method             String
+  namespace          String
+  targetService      String?
+  intensity          String?
+  durationSeconds    Int
+  startedAt          DateTime
+  endedAt            DateTime
+  recoveryTimeSeconds Int?
+  errors             String?
+  metricsSummary     Json?
+  createdAt          DateTime  @default(now())
+}
+
+model Schedule {
+  id             String   @id @default(cuid())
+  name           String
+  cronExpression String
+  enabled        Boolean  @default(true)
+  templateId     String?
+  lastRunAt      DateTime?
+  nextRunAt      DateTime?
+  createdAt      DateTime @default(now())
+}
+
+model Template {
+  id                     String   @id @default(cuid())
+  name                   String   @unique
+  description            String
+  failureType            String
+  defaultNamespace       String?
+  defaultService         String?
+  defaultIntensity       String?
+  defaultDurationSeconds Int?
+  config                 Json?
+  createdAt              DateTime @default(now())
+}
+
+model DependencyEdge {
+  id          String   @id @default(cuid())
+  fromService String
+  toService   String
+  description String?
+  createdAt   DateTime @default(now())
+}

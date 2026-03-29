@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simulator-backend
+  namespace: simulator
+  labels:
+    app: simulator-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simulator-backend
+  template:
+    metadata:
+      labels:
+        app: simulator-backend
+    spec:
+      serviceAccountName: simulator-sa
+      containers:
+        - name: backend
+          image: YOUR_REGISTRY/simulator-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 4000
+          envFrom:
+            - configMapRef:
+                name: simulator-config
+            - secretRef:
+                name: simulator-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4000
+            initialDelaySeconds: 10
+            periodSeconds: 20
+
