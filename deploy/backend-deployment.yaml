@@ -18,7 +18,7 @@ spec:
       serviceAccountName: simulator-sa
       containers:
         - name: backend
-          image: YOUR_REGISTRY/simulator-backend:latest
+          image: gcr.io/food-app-backend-01/simulator-backend:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 4000
