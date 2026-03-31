@@ -19,7 +19,7 @@ spec:
       containers:
         - name: backend
           image: gcr.io/food-app-backend-01/simulator-backend:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - containerPort: 4000
           envFrom:

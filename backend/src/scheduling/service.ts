@@ -44,7 +44,17 @@ export async function refreshSchedules(): Promise<void> {
           dryRun: Boolean(input.dryRun ?? true),
         },
       );
-      void runSimulation(sim.id);
+      void runSimulation(sim.id).catch(async (e) => {
+        console.error(`[Scheduler] Failed to run scheduled simulation ${sim.id}:`, e);
+        await db.auditLog.create({
+          data: {
+            userId: admin.id,
+            action: 'simulation.run_failed',
+            simulationId: sim.id,
+            metadata: { error: e?.message ?? String(e), source: 'scheduler' },
+          },
+        });
+      });
     });
 
     tasks.set(sched.id, task);

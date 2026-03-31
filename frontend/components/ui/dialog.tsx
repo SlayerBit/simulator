@@ -39,4 +39,8 @@ const DialogDescription = ({ className, ...props }: DialogPrimitive.DialogDescri
   <DialogPrimitive.Description className={cn('text-sm text-muted-foreground', className)} {...props} />
 );
 
-export { Dialog, DialogTrigger, DialogClose, DialogContent, DialogHeader, DialogTitle, DialogDescription };
+const DialogFooter = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
+  <div className={cn('flex flex-col-reverse sm:flex-row sm:justify-end sm:gap-2 pt-4', className)} {...props} />
+);
+
+export { Dialog, DialogTrigger, DialogClose, DialogContent, DialogHeader, DialogFooter, DialogTitle, DialogDescription };

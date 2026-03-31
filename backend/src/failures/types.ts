@@ -21,7 +21,7 @@ export interface FailureMethod {
   id: string;
   title: string;
   supports: FailureType;
-  validate: (params: FailureParams) => void;
+  validate: (params: FailureParams) => Promise<void>;
   apply: (params: FailureParams) => Promise<FailureResult>;
   rollback: (params: FailureParams) => Promise<void>;
 }

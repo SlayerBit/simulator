@@ -9,8 +9,71 @@ export const templatesRouter = Router();
 // GET /api/templates
 templatesRouter.get('/', authMiddleware(['admin', 'engineer', 'viewer']), async (_req: Request, res: Response) => {
   const prisma = getPrismaClient();
-  const templates = await prisma.template.findMany({ orderBy: { name: 'asc' } });
+  const templates = await prisma.template.findMany({ 
+    include: { schedules: true },
+    orderBy: { name: 'asc' } 
+  });
   return res.json({ templates });
+});
+
+// GET /api/templates/:id
+templatesRouter.get('/:id', authMiddleware(['admin', 'engineer', 'viewer']), async (req: Request, res: Response) => {
+  const prisma = getPrismaClient();
+  const template = await prisma.template.findUnique({ where: { id: String(req.params.id) } });
+  if (!template) return res.status(404).json({ error: { message: 'Template not found' } });
+  return res.json({ template });
+});
+
+// POST /api/templates
+templatesRouter.post('/', authMiddleware(['admin', 'engineer']), async (req: Request, res: Response) => {
+  const prisma = getPrismaClient();
+  const { name, description, failureType, defaultNamespace, defaultService, defaultIntensity, defaultDurationSeconds, config } = req.body;
+  
+  try {
+    const template = await prisma.template.create({
+      data: {
+        name,
+        description: description || '',
+        failureType,
+        defaultNamespace,
+        defaultService,
+        defaultIntensity: String(defaultIntensity || ''),
+        defaultDurationSeconds: Number(defaultDurationSeconds || 60),
+        config: config || {},
+      },
+    });
+    return res.status(201).json({ template });
+  } catch (err: any) {
+    return res.status(400).json({ error: { message: err.message } });
+  }
+});
+
+// PATCH /api/templates/:id
+templatesRouter.patch('/:id', authMiddleware(['admin', 'engineer']), async (req: Request, res: Response) => {
+  const prisma = getPrismaClient();
+  const id = String(req.params.id);
+  const data = req.body;
+
+  try {
+    const template = await prisma.template.update({
+      where: { id },
+      data: {
+        ...data,
+        defaultDurationSeconds: data.defaultDurationSeconds ? Number(data.defaultDurationSeconds) : undefined,
+      },
+    });
+    return res.json({ template });
+  } catch (err: any) {
+    return res.status(400).json({ error: { message: err.message } });
+  }
+});
+
+// DELETE /api/templates/:id
+templatesRouter.delete('/:id', authMiddleware(['admin', 'engineer']), async (req: Request, res: Response) => {
+  const prisma = getPrismaClient();
+  const id = String(req.params.id);
+  await prisma.template.delete({ where: { id } });
+  return res.status(204).send();
 });
 
 // POST /api/templates/:id/run

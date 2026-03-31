@@ -1,6 +1,7 @@
 import { loadDotenvIfNeeded } from './config/load-dotenv.js';
 import { loadConfig } from './config/env.js';
 import { startScheduler } from './scheduling/service.js';
+import { startSimulationWorker } from './simulations/service.js';
 import { ensureDefaultAdmin } from './auth/service.js';
 import { createApp } from './app.js';
 
@@ -11,6 +12,11 @@ const app = createApp();
 app.listen(config.port, () => {
   // eslint-disable-next-line no-console
   console.log(`Simulator backend listening on port ${config.port}`);
+});
+
+console.log("Starting simulation worker...");
+startSimulationWorker().catch((e) => {
+  console.error("Worker crashed on startup:", e);
 });
 
 void startScheduler().catch((e) => {

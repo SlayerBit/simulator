@@ -43,6 +43,8 @@ export default function NewSimulationPage() {
   const [latencyMs, setLatencyMs] = useState<number | undefined>(undefined);
   const [packetLossPercent, setPacketLossPercent] = useState<number | undefined>(undefined);
   const [dryRun, setDryRun] = useState(true);
+  const [saveAsTemplate, setSaveAsTemplate] = useState(false);
+  const [templateName, setTemplateName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -104,6 +106,17 @@ export default function NewSimulationPage() {
         ...(typeof packetLossPercent === 'number' ? { packetLossPercent } : {}),
         dryRun,
       };
+
+      if (saveAsTemplate) {
+        await api.createTemplate(token, {
+          name: templateName || name || `${failureType} template`,
+          failureType,
+          defaultNamespace: namespace,
+          defaultDurationSeconds: durationSeconds,
+          config: body,
+        });
+      }
+
       const res = await api.createSimulation(token, body);
       router.push(`/simulations/${res.simulation.id}`);
     } catch (e: any) {
@@ -199,13 +212,30 @@ export default function NewSimulationPage() {
               <Input type="number" value={packetLossPercent ?? ''} onChange={(e) => setPacketLossPercent(e.target.value ? Number(e.target.value) : undefined)} min={1} max={100} />
             </div>
 
-            <label className="flex items-center gap-3 rounded-lg bg-slate-800/30 border border-slate-800/40 px-4 py-3 cursor-pointer transition-colors hover:bg-slate-800/50">
-              <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} className="accent-indigo-500 h-4 w-4" />
-              <div>
-                <div className="text-sm font-medium text-slate-200">Dry-run mode</div>
-                <div className="text-[12px] text-slate-500">Recommended for first execution in a namespace</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <label className="flex items-center gap-3 rounded-lg bg-slate-800/30 border border-slate-800/40 px-4 py-3 cursor-pointer transition-colors hover:bg-slate-800/50">
+                <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} className="accent-indigo-500 h-4 w-4" />
+                <div>
+                  <div className="text-sm font-medium text-slate-200">Dry-run mode</div>
+                  <div className="text-[12px] text-slate-500">Recommended for first execution in a namespace</div>
+                </div>
+              </label>
+
+              <label className="flex items-center gap-3 rounded-lg bg-slate-800/30 border border-slate-800/40 px-4 py-3 cursor-pointer transition-colors hover:bg-slate-800/50">
+                <input type="checkbox" checked={saveAsTemplate} onChange={(e) => setSaveAsTemplate(e.target.checked)} className="accent-indigo-500 h-4 w-4" />
+                <div>
+                  <div className="text-sm font-medium text-slate-200">Save as Template</div>
+                  <div className="text-[12px] text-slate-500">Persist this config for one-click reuse</div>
+                </div>
+              </label>
+            </div>
+
+            {saveAsTemplate && (
+              <div className="space-y-1.5 animate-in fade-in slide-in-from-top-1 duration-200">
+                <label className="text-[13px] font-medium text-slate-300">Template name</label>
+                <Input value={templateName} onChange={(e) => setTemplateName(e.target.value)} placeholder="e.g. Standard Redis Latency Test" required />
               </div>
-            </label>
+            )}
 
             {/* Preview */}
             <Card className="border-slate-700/40 bg-slate-800/20">
@@ -233,13 +263,13 @@ export default function NewSimulationPage() {
             ) : null}
 
             <div className="flex gap-2 pt-2">
-              <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+              <Dialog open={confirmOpen} onOpenChange={(v: boolean) => setConfirmOpen(v)}>
                 <DialogTrigger asChild>
                   <Button disabled={submitting || !token || !canCreate} className="bg-gradient-to-r from-indigo-500 to-violet-600 text-white border-0 hover:from-indigo-400 hover:to-violet-500 shadow-md shadow-indigo-500/20">
                     {submitting ? 'Starting…' : 'Start simulation'}
                   </Button>
                 </DialogTrigger>
-                <DialogContent>
+                <DialogContent className="bg-slate-950 border-slate-800">
                   <DialogHeader>
                     <DialogTitle>Confirm simulation run</DialogTitle>
                     <DialogDescription>Dry-run is safest for first execution in a namespace.</DialogDescription>
@@ -249,7 +279,7 @@ export default function NewSimulationPage() {
                       <AlertTriangle className="h-4 w-4 shrink-0" /> Live mutation mode enabled
                     </div>
                   ) : null}
-                  <div className="flex justify-end gap-2">
+                  <div className="flex justify-end gap-2 p-4">
                     <Button variant="outline" onClick={() => setConfirmOpen(false)}>Cancel</Button>
                     <Button disabled={submitting} onClick={() => void submitSimulation()} className="bg-gradient-to-r from-indigo-500 to-violet-600 text-white border-0">Confirm</Button>
                   </div>

@@ -32,6 +32,8 @@ export const api = {
   login: (body: { email: string; password: string }) =>
     request<{ user: any; token: string }>('/api/auth/login', { method: 'POST', body: JSON.stringify(body) }),
   me: (token: string) => request<{ authenticated: boolean; user?: any }>('/api/auth/me', { method: 'GET', token }),
+
+  // Simulations
   listSimulations: (token: string) => request<{ simulations: any[] }>('/api/simulations', { method: 'GET', token }),
   createSimulation: (token: string, body: any) =>
     request<{ simulation: any }>('/api/simulations', { method: 'POST', token, body: JSON.stringify(body) }),
@@ -39,11 +41,39 @@ export const api = {
     request<{ id: string; status: string }>(`/api/simulations/${id}/stop`, { method: 'POST', token }),
   getSimulation: (token: string, id: string) =>
     request<any>(`/api/simulations/${id}`, { method: 'GET', token }),
-  templates: (token: string) => request<{ templates: any[] }>('/api/templates', { method: 'GET', token }),
-  runTemplate: (token: string, id: string) => request<{ simulation: any }>(`/api/templates/${id}/run`, { method: 'POST', token }),
-  schedules: (token: string) => request<{ schedules: any[] }>('/api/schedules', { method: 'GET', token }),
+  retrySimulation: (token: string, id: string) =>
+    request<{ simulation: any }>(`/api/simulations/${id}/retry`, { method: 'POST', token }),
+
+  // Templates
+  listTemplates: (token: string) => request<{ templates: any[] }>('/api/templates', { method: 'GET', token }),
+  getTemplate: (token: string, id: string) => request<{ template: any }>(`/api/templates/${id}`, { method: 'GET', token }),
+  createTemplate: (token: string, body: any) =>
+    request<{ template: any }>('/api/templates', { method: 'POST', token, body: JSON.stringify(body) }),
+  updateTemplate: (token: string, id: string, body: any) =>
+    request<{ template: any }>(`/api/templates/${id}`, { method: 'PATCH', token, body: JSON.stringify(body) }),
+  deleteTemplate: (token: string, id: string) =>
+    request<void>(`/api/templates/${id}`, { method: 'DELETE', token }),
+  runTemplate: (token: string, id: string) => 
+    request<{ simulation: any }>(`/api/templates/${id}/run`, { method: 'POST', token }),
+
+  // Schedules
+  listSchedules: (token: string) => request<{ schedules: any[] }>('/api/schedules', { method: 'GET', token }),
+  createSchedule: (token: string, body: any) =>
+    request<{ schedule: any }>('/api/schedules', { method: 'POST', token, body: JSON.stringify(body) }),
+  updateSchedule: (token: string, id: string, body: any) =>
+    request<{ schedule: any }>(`/api/schedules/${id}`, { method: 'PATCH', token, body: JSON.stringify(body) }),
+  deleteSchedule: (token: string, id: string) =>
+    request<void>(`/api/schedules/${id}`, { method: 'DELETE', token }),
+
+  // Dependencies
+  listDependencies: (token: string) => request<{ services: string[]; edges: any[] }>('/api/dependencies', { method: 'GET', token }),
+  createDependency: (token: string, body: { fromService: string; toService: string; description?: string }) =>
+    request<{ edge: any }>('/api/dependencies', { method: 'POST', token, body: JSON.stringify(body) }),
+  deleteDependency: (token: string, id: string) =>
+    request<void>(`/api/dependencies/${id}`, { method: 'DELETE', token }),
+
+  // Analytics & Observability
   audit: (token: string) => request<{ events: any[] }>('/api/audit', { method: 'GET', token }),
-  dependencies: (token: string) => request<any>('/api/dependencies', { method: 'GET', token }),
   metrics: (token: string) => request<any>('/api/metrics', { method: 'GET', token }),
 };
 

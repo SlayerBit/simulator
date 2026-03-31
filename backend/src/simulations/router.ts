@@ -89,15 +89,29 @@ simulationsRouter.get('/:id', authMiddleware(['admin', 'engineer', 'viewer']), a
   const prisma = getPrismaClient();
   const id = String(req.params.id);
   const user = (req as RequestWithUser).user!;
-  const sim = await prisma.simulation.findUnique({ where: { id } });
+  
+  const sim = await prisma.simulation.findUnique({ 
+    where: { id },
+    include: {
+      steps: { orderBy: { timestamp: 'asc' } },
+      failureEvents: { orderBy: { startedAt: 'asc' } },
+      recoveryActions: { orderBy: { startedAt: 'asc' } },
+      reports: { orderBy: { createdAt: 'desc' }, take: 1 }
+    }
+  });
+
   if (!sim) return res.status(404).json({ error: { message: 'Not found' } });
   if (user.role !== 'admin' && sim.createdById !== user.id) {
     return res.status(403).json({ error: { message: 'Forbidden' } });
   }
-  const events = await prisma.failureEvent.findMany({ where: { simulationId: id }, orderBy: { startedAt: 'asc' } });
-  const recovery = await prisma.recoveryAction.findMany({ where: { simulationId: id }, orderBy: { startedAt: 'asc' } });
-  const reports = await prisma.report.findMany({ where: { simulationId: id }, orderBy: { createdAt: 'desc' }, take: 1 });
-  return res.json({ simulation: sim, failureEvents: events, recoveryActions: recovery, report: reports[0] ?? null });
+
+  return res.json({ 
+    simulation: sim, 
+    steps: sim.steps,
+    failureEvents: sim.failureEvents, 
+    recoveryActions: sim.recoveryActions, 
+    report: sim.reports[0] ?? null 
+  });
 });
 
 // POST /api/simulations/:id/retry
@@ -109,18 +123,35 @@ simulationsRouter.post('/:id/retry', authMiddleware(['admin', 'engineer']), asyn
   if (!sim) return res.status(404).json({ error: { message: 'Not found' } });
   if (user.role !== 'admin' && sim.createdById !== user.id) return res.status(403).json({ error: { message: 'Forbidden' } });
 
+  // Fetch original failure event so we clone the method name.
+  const origEvent = await prisma.failureEvent.findFirst({ where: { simulationId: id } });
+
   const newSim = await prisma.simulation.create({
     data: {
-      ...sim,
-      id: undefined as any,
-      createdAt: undefined as any,
-      updatedAt: undefined as any,
-      startedAt: null,
-      completedAt: null,
-      state: 'pending',
       name: `${sim.name}-retry`,
-    } as any,
+      failureType: sim.failureType,
+      state: 'pending',
+      namespace: sim.namespace,
+      targetService: sim.targetService ?? null,
+      targetDeployment: sim.targetDeployment ?? null,
+      targetPod: sim.targetPod ?? null,
+      labelSelector: sim.labelSelector ?? null,
+      intensity: sim.intensity ?? null,
+      durationSeconds: sim.durationSeconds,
+      dryRun: sim.dryRun,
+      createdById: user.id,
+    },
   });
+
+  // Clone the FailureEvent so runSimulation can find the method id.
+  await prisma.failureEvent.create({
+    data: {
+      simulationId: newSim.id,
+      method: origEvent?.method ?? 'delete-pods',
+      state: 'pending',
+    },
+  });
+
   void runSimulation(newSim.id);
   return res.status(201).json({ simulation: newSim });
 });
@@ -133,7 +164,18 @@ simulationsRouter.post('/:id/dry-run', authMiddleware(['admin', 'engineer']), as
   const sim = await prisma.simulation.findUnique({ where: { id } });
   if (!sim) return res.status(404).json({ error: { message: 'Not found' } });
   if (user.role !== 'admin' && sim.createdById !== user.id) return res.status(403).json({ error: { message: 'Forbidden' } });
-  const updated = await prisma.simulation.update({ where: { id }, data: { dryRun: true } });
+
+  // Reset state so runSimulation does not skip a terminated simulation.
+  const updated = await prisma.simulation.update({
+    where: { id },
+    data: {
+      dryRun: true,
+      state: 'pending',
+      startedAt: null,
+      completedAt: null,
+    },
+  });
+
   void runSimulation(updated.id);
   return res.status(200).json({ simulation: updated });
 });

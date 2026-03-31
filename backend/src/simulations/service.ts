@@ -6,6 +6,7 @@ import type { FailureParams } from '../failures/types.js';
 import { RollbackStack } from '../recovery/rollback.js';
 import { countActiveRuns, endActiveRun, getActiveRun, registerActiveRun } from './active-runs.js';
 import { loadConfig } from '../config/env.js';
+import { clearSimStepCounter } from './steps.js';
 
 export interface CreateSimulationInput {
   name: string;
@@ -36,7 +37,9 @@ export async function createSimulationRecord(user: UserIdentity, input: CreateSi
       dryRun: input.dryRun,
       createdById: user.id,
     },
+
   });
+
 
   await prisma.failureEvent.create({
     data: {
@@ -86,6 +89,9 @@ export async function runSimulation(simulationId: string): Promise<void> {
   if (!sim) throw new Error('Simulation not found');
   if (sim.state === 'running') return;
 
+  console.log(`[Simulator] Running simulation: ${simulationId}`);
+  console.log(`[Simulator] Executing failure: ${sim.failureType}`);
+
   const runningCount = await prisma.simulation.count({ where: { state: 'running' } as any });
   if (runningCount + countActiveRuns() >= config.maxConcurrentSimulations) {
     const err: any = new Error('Maximum concurrent simulations reached');
@@ -93,6 +99,7 @@ export async function runSimulation(simulationId: string): Promise<void> {
     throw err;
   }
 
+  console.log(`[Simulator] Starting simulation: ${simulationId} (type: ${sim.failureType})`);
   const rollback = new RollbackStack();
   const activeRun = registerActiveRun(simulationId);
   const signal = activeRun.controller.signal;
@@ -102,6 +109,7 @@ export async function runSimulation(simulationId: string): Promise<void> {
     where: { id: simulationId },
     data: { state: 'running', startedAt: new Date() },
   });
+  console.log(`[Simulator] Simulation ${simulationId} marked as RUNNING`);
 
   const ev = await prisma.failureEvent.findFirst({ where: { simulationId } });
   const methodId = ev?.method ?? 'unknown';
@@ -126,7 +134,7 @@ export async function runSimulation(simulationId: string): Promise<void> {
     simulationId: sim.id,
   };
 
-  failureMethod.validate(params);
+  await failureMethod.validate(params);
 
   rollback.push({
     name: `rollback:${failureMethod.supports}:${failureMethod.id}`,
@@ -258,6 +266,7 @@ export async function runSimulation(simulationId: string): Promise<void> {
         errors: `${e?.message ?? String(e)}; rollback: ${rb.errors.join('; ')}`,
       } as any,
     });
+    console.error(`[Simulator] Simulation ${simulationId} FAILED:`, e);
     throw e;
   } finally {
     await prisma.recoveryAction.create({
@@ -277,6 +286,7 @@ export async function runSimulation(simulationId: string): Promise<void> {
       },
     });
     endActiveRun(simulationId);
+    clearSimStepCounter(simulationId);
   }
 }
 
@@ -332,4 +342,60 @@ function parsePacketLoss(_intensity: string | null): number | undefined {
 
 export function createSimulationName(prefix = 'sim'): string {
   return `${prefix}-${nanoid(8)}`;
+}
+
+export async function startSimulationWorker(): Promise<void> {
+  console.log("[Worker] started");
+
+  try {
+    const prisma = getPrismaClient();
+    const updated = await prisma.simulation.updateMany({
+      where: { state: 'running' },
+      data: { state: 'failed', completedAt: new Date() }
+    });
+    if (updated.count > 0) {
+      console.log(`[Worker] Marked ${updated.count} orphaned running simulations as failed.`);
+      await prisma.failureEvent.updateMany({
+        where: { state: 'running' },
+        data: { state: 'failed', endedAt: new Date(), errorMessage: 'Abandoned due to worker reboot' }
+      });
+    }
+  } catch (e) {
+    console.warn('[Worker] Failed to cleanup orphaned simulations', e);
+  }
+
+  // Periodically check for stuck 'pending' simulations
+  const poll = async () => {
+    console.log('[Worker] Polling simulations');
+    try {
+      const prisma = getPrismaClient();
+      const pendingSims = await prisma.simulation.findMany({
+        where: { state: 'pending' },
+        take: 10,
+      });
+
+      if (pendingSims.length > 0) {
+        console.log(`[Worker] Found ${pendingSims.length} pending simulations to process.`);
+      }
+
+      for (const sim of pendingSims) {
+        console.log(`[Worker] Triggering runSimulation for ${sim.id}`);
+        // Fire runSimulation for each found pending simulation.
+        // runSimulation has internal checks (state === 'running') to prevent race conditions.
+        void runSimulation(sim.id).catch((e) => {
+          console.error(`[Worker] Failed to execute simulation ${sim.id}:`, e);
+        });
+      }
+    } catch (e) {
+      console.error('[Worker] Simulation worker poll failed', e);
+    }
+  };
+
+  // Poll every 30 seconds
+  setInterval(() => {
+    void poll();
+  }, 30000);
+
+  // Initial immediate run
+  void poll();
 }

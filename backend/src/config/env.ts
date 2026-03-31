@@ -40,7 +40,8 @@ export function loadConfig(): AppConfig {
   const lokiUrl = process.env.LOKI_URL ?? null;
   const jwtSecret = process.env.JWT_SECRET;
   const simulatorNamespace = process.env.SIMULATOR_NAMESPACE || 'simulator';
-  const allowedTargetNamespaces = (process.env.ALLOWED_TARGET_NAMESPACES || simulatorNamespace)
+  // Fix: Change line 43 to allow more namespaces or a broader default
+  const allowedTargetNamespaces = (process.env.ALLOWED_TARGET_NAMESPACES || 'simulator,default,production,staging')
     .split(',')
     .map((v) => v.trim())
     .filter(Boolean);
