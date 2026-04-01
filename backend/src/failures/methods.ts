@@ -14,6 +14,7 @@ import {
   type StepRef,
 } from '../kubernetes/ops.js';
 import { recordSimulationStep } from '../simulations/steps.js';
+import { getPrismaClient } from '../database/client.js';
 
 type Snapshot =
   | { kind: 'deployment'; deploymentName: string; namespace: string; body: any }
@@ -31,6 +32,18 @@ async function snapshotDeployment(simulationId: string, namespace: string, deplo
   if (snapshots.has(key)) return;
   const current = await readDeployment(namespace, deploymentName);
   snapshots.set(key, { kind: 'deployment', namespace, deploymentName, body: current });
+
+  // Persistence (C-05)
+  await getPrismaClient().rollbackEntry.create({
+    data: {
+      simulationId,
+      actionName: 'restore-deployment',
+      resourceType: 'deployment',
+      resourceName: deploymentName,
+      namespace,
+      snapshotData: current as any,
+    },
+  });
 }
 
 async function restoreDeployment(simulationId: string, namespace: string, deploymentName: string, ref?: StepRef): Promise<void> {
@@ -39,6 +52,12 @@ async function restoreDeployment(simulationId: string, namespace: string, deploy
   if (!snap || snap.kind !== 'deployment') return;
   await replaceDeployment(namespace, deploymentName, snap.body, ref);
   snapshots.delete(key);
+
+  // Persistence (C-05)
+  await getPrismaClient().rollbackEntry.updateMany({
+    where: { simulationId, actionName: 'restore-deployment', resourceName: deploymentName, namespace },
+    data: { status: 'completed', completedAt: new Date() },
+  });
 }
 
 async function snapshotReplicas(simulationId: string, namespace: string, deploymentName: string): Promise<void> {
@@ -47,6 +66,18 @@ async function snapshotReplicas(simulationId: string, namespace: string, deploym
   const current = await readDeployment(namespace, deploymentName);
   const replicas = current?.spec?.replicas ?? null;
   snapshots.set(key, { kind: 'replicas', namespace, deploymentName, replicas });
+
+  // Persistence (C-05)
+  await getPrismaClient().rollbackEntry.create({
+    data: {
+      simulationId,
+      actionName: 'restore-replicas',
+      resourceType: 'deployment',
+      resourceName: deploymentName,
+      namespace,
+      snapshotData: { replicas } as any,
+    },
+  });
 }
 
 async function restoreReplicas(simulationId: string, namespace: string, deploymentName: string, ref?: StepRef): Promise<void> {
@@ -57,6 +88,12 @@ async function restoreReplicas(simulationId: string, namespace: string, deployme
     await scaleDeployment(namespace, deploymentName, snap.replicas, ref);
   }
   snapshots.delete(key);
+
+  // Persistence (C-05)
+  await getPrismaClient().rollbackEntry.updateMany({
+    where: { simulationId, actionName: 'restore-replicas', resourceName: deploymentName, namespace },
+    data: { status: 'completed', completedAt: new Date() },
+  });
 }
 
 async function snapshotNetworkPolicy(simulationId: string, namespace: string, policyName: string): Promise<void> {
@@ -64,6 +101,18 @@ async function snapshotNetworkPolicy(simulationId: string, namespace: string, po
   if (snapshots.has(key)) return;
   const existing = await readNetworkPolicy(namespace, policyName);
   snapshots.set(key, { kind: 'networkpolicy', namespace, policyName, body: existing });
+
+  // Persistence (C-05)
+  await getPrismaClient().rollbackEntry.create({
+    data: {
+      simulationId,
+      actionName: 'restore-networkpolicy',
+      resourceType: 'networkpolicy',
+      resourceName: policyName,
+      namespace,
+      snapshotData: existing as any,
+    },
+  });
 }
 
 async function restoreNetworkPolicy(simulationId: string, namespace: string, policyName: string, ref?: StepRef): Promise<void> {
@@ -76,6 +125,12 @@ async function restoreNetworkPolicy(simulationId: string, namespace: string, pol
     await deleteNetworkPolicy(namespace, policyName, ref);
   }
   snapshots.delete(key);
+
+  // Persistence (C-05)
+  await getPrismaClient().rollbackEntry.updateMany({
+    where: { simulationId, actionName: 'restore-networkpolicy', resourceName: policyName, namespace },
+    data: { status: 'completed', completedAt: new Date() },
+  });
 }
 
 function ensureTargetBasics(p: FailureParams): void {
@@ -154,7 +209,7 @@ const podCrashDeletePods: FailureMethod = {
     const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
     return ok(`Deleted ${count} pods`);
   },
-  rollback: async () => {},
+  rollback: async () => { },
 };
 
 const podCrashScaleToZero: FailureMethod = {
@@ -403,7 +458,7 @@ const svcUnavailableRestartPods: FailureMethod = {
     const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
     return ok(`Restarted ${count} pods`);
   },
-  rollback: async () => {},
+  rollback: async () => { },
 };
 
 // 3) Database Connection Failure
@@ -537,7 +592,7 @@ const dbFailRestartPods: FailureMethod = {
     const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
     return ok(`Restarted ${count} pods`);
   },
-  rollback: async () => {},
+  rollback: async () => { },
 };
 
 // 4) Cache Unavailability
@@ -563,7 +618,7 @@ const cacheKillPods: FailureMethod = {
     const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
     return ok(`Deleted ${count} cache pods`);
   },
-  rollback: async () => {},
+  rollback: async () => { },
 };
 
 const cacheBlockTraffic: FailureMethod = {
@@ -735,7 +790,7 @@ const netLatencyRestartPods: FailureMethod = {
     const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
     return ok(`Restarted ${count} pods`);
   },
-  rollback: async () => {},
+  rollback: async () => { },
 };
 
 const netLatencyDenyEgressBrief: FailureMethod = {
@@ -800,7 +855,7 @@ const netLatencyScaleDown: FailureMethod = {
     await scaleDeployment(p.target.namespace, requireDeployment(p), 1, ref);
     return ok('Scaled to 1');
   },
-  rollback: async () => {},
+  rollback: async () => { },
 };
 
 // 6) Packet Loss Between Services
@@ -904,7 +959,7 @@ const pktLossRestartPods: FailureMethod = {
     const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
     return ok(`Restarted ${count} pods`);
   },
-  rollback: async () => {},
+  rollback: async () => { },
 };
 
 const pktLossScaleDown: FailureMethod = {
@@ -929,7 +984,7 @@ const pktLossScaleDown: FailureMethod = {
     await scaleDeployment(p.target.namespace, requireDeployment(p), 1, ref);
     return ok('Scaled to 1');
   },
-  rollback: async () => {},
+  rollback: async () => { },
 };
 
 // 7) CPU Saturation
@@ -1008,7 +1063,7 @@ const cpuRestartPods: FailureMethod = {
     const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
     return ok(`Restarted ${count} pods`);
   },
-  rollback: async () => {},
+  rollback: async () => { },
 };
 
 const cpuScaleDown: FailureMethod = {
@@ -1033,7 +1088,7 @@ const cpuScaleDown: FailureMethod = {
     await scaleDeployment(p.target.namespace, requireDeployment(p), 1, ref);
     return ok('Scaled down');
   },
-  rollback: async () => {},
+  rollback: async () => { },
 };
 
 const cpuTightLoopCommand: FailureMethod = {
@@ -1163,7 +1218,7 @@ const memRestartPods: FailureMethod = {
     const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
     return ok(`Restarted ${count} pods`);
   },
-  rollback: async () => {},
+  rollback: async () => { },
 };
 
 const memAllocateMemoryCommand: FailureMethod = {
@@ -1339,7 +1394,7 @@ const diskRestartPods: FailureMethod = {
     const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
     return ok(`Restarted ${count} pods`);
   },
-  rollback: async () => {},
+  rollback: async () => { },
 };
 
 // 10) Deployment Misconfiguration
@@ -1464,7 +1519,7 @@ const misconfigRestartPods: FailureMethod = {
     const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
     return ok(`Restarted ${count} pods`);
   },
-  rollback: async () => {},
+  rollback: async () => { },
 };
 
 // 11) Auto-scaling Failure
@@ -1520,7 +1575,7 @@ const autoscalingScaleDown: FailureMethod = {
     await scaleDeployment(p.target.namespace, requireDeployment(p), 1, ref);
     return ok('Scaled to 1');
   },
-  rollback: async () => {},
+  rollback: async () => { },
 };
 
 const autoscalingRestartPods: FailureMethod = {
@@ -1545,7 +1600,7 @@ const autoscalingRestartPods: FailureMethod = {
     const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
     return ok(`Restarted ${count} pods`);
   },
-  rollback: async () => {},
+  rollback: async () => { },
 };
 
 const autoscalingBadEnv: FailureMethod = {
@@ -1840,7 +1895,7 @@ const ingressMisrouteRestartPods: FailureMethod = {
     const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
     return ok(`Restarted ${count} pods`);
   },
-  rollback: async () => {},
+  rollback: async () => { },
 };
 
 export function registerAllFailureMethods(): void {

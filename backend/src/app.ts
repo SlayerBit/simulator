@@ -1,9 +1,9 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import morgan from 'morgan';
 import { loadConfig } from './config/env.js';
 import { apiRouter } from './api/router.js';
+import { httpLogger } from './logging/logger.js';
 import { errorHandler } from './logging/error-handler.js';
 import { registerAllFailureMethods } from './failures/methods.js';
 
@@ -20,7 +20,7 @@ export function createApp() {
       credentials: true,
     }),
   );
-  app.use(morgan('combined'));
+  app.use(httpLogger);
   app.use(express.json());
 
   app.get('/health', (_req, res) => {
@@ -32,8 +32,8 @@ export function createApp() {
   });
 
   app.use('/api', apiRouter);
+
   app.use(errorHandler);
 
   return app;
 }
-

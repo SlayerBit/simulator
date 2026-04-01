@@ -27,8 +27,8 @@ ENV NODE_ENV=production
 # Copy prod dependencies (includes generated Prisma client!)
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-# If you have specific generated non-prisma src files:
-COPY --from=build /app/src/generated ./dist/generated 
+# Safely copy generated files if they exist
+RUN if [ -d "/app/src/generated" ]; then cp -r /app/src/generated ./dist/generated; fi
 COPY prisma ./prisma
 COPY package.json ./
 EXPOSE 4000

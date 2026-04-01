@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
+import { logger } from './logger.js';
 
 interface ErrorWithStatus extends Error {
   status?: number;
@@ -13,8 +14,9 @@ export function errorHandler(
   const status = err.status && err.status >= 400 && err.status < 600 ? err.status : 500;
 
   if (status >= 500) {
-    // eslint-disable-next-line no-console
-    console.error('Unhandled error', err);
+    logger.error({ err }, 'Unhandled server error');
+  } else {
+    logger.warn({ err, status }, 'Client request error');
   }
 
   res.status(status).json({

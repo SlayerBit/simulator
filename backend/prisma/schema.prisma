@@ -48,11 +48,12 @@ model Simulation {
   failureEvents   FailureEvent[]
   recoveryActions RecoveryAction[]
   reports         Report[]
+  rollbackEntries RollbackEntry[]
 }
 
 model SimulationStep {
   id           String     @id @default(cuid())
-  simulation   Simulation @relation(fields: [simulationId], references: [id])
+  simulation   Simulation @relation(fields: [simulationId], references: [id], onDelete: Cascade)
   simulationId String
   order        Int
   name         String
@@ -74,7 +75,7 @@ model SimulationStep {
 
 model FailureEvent {
   id           String     @id @default(cuid())
-  simulation   Simulation @relation(fields: [simulationId], references: [id])
+  simulation   Simulation @relation(fields: [simulationId], references: [id], onDelete: Cascade)
   simulationId String
   method       String
   state        String
@@ -85,7 +86,7 @@ model FailureEvent {
 
 model RecoveryAction {
   id           String     @id @default(cuid())
-  simulation   Simulation @relation(fields: [simulationId], references: [id])
+  simulation   Simulation @relation(fields: [simulationId], references: [id], onDelete: Cascade)
   simulationId String
   description  String
   startedAt    DateTime   @default(now())
@@ -106,7 +107,7 @@ model AuditLog {
 
 model Report {
   id                 String     @id @default(cuid())
-  simulation         Simulation @relation(fields: [simulationId], references: [id])
+  simulation         Simulation @relation(fields: [simulationId], references: [id], onDelete: Cascade)
   simulationId       String
   summary            String
   result             String
@@ -131,7 +132,7 @@ model Schedule {
   enabled        Boolean  @default(true)
   
   templateId     String?
-  template       Template? @relation(fields: [templateId], references: [id])
+  template       Template? @relation(fields: [templateId], references: [id], onDelete: Cascade)
 
   lastRunAt      DateTime?
   nextRunAt      DateTime?
@@ -151,6 +152,21 @@ model Template {
   createdAt              DateTime @default(now())
 
   schedules              Schedule[]
+}
+
+model RollbackEntry {
+  id           String     @id @default(cuid())
+  simulation   Simulation @relation(fields: [simulationId], references: [id], onDelete: Cascade)
+  simulationId String
+  actionName   String
+  resourceType String?
+  resourceName String?
+  namespace    String?
+  snapshotData Json?
+  status       String     @default("pending")
+  error        String?
+  createdAt    DateTime   @default(now())
+  completedAt  DateTime?
 }
 
 model DependencyEdge {

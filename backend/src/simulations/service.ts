@@ -85,18 +85,25 @@ export async function runSimulation(simulationId: string): Promise<void> {
     throw err;
   }
 
-  const sim = await prisma.simulation.findUnique({ where: { id: simulationId } });
-  if (!sim) throw new Error('Simulation not found');
-  if (sim.state === 'running') return;
+  const result = await prisma.simulation.updateMany({
+    where: { id: simulationId, state: 'pending' },
+    data: { state: 'running', startedAt: new Date() },
+  });
 
-  console.log(`[Simulator] Running simulation: ${simulationId}`);
-  console.log(`[Simulator] Executing failure: ${sim.failureType}`);
+  if (result.count === 0) {
+    console.log(`[Simulator] Simulation ${simulationId} was not in 'pending' state or already claimed.`);
+    return;
+  }
+
+  const sim = await prisma.simulation.findUnique({ where: { id: simulationId } });
+  if (!sim) throw new Error('Simulation disappeared during claim');
 
   const runningCount = await prisma.simulation.count({ where: { state: 'running' } as any });
   if (runningCount + countActiveRuns() >= config.maxConcurrentSimulations) {
-    const err: any = new Error('Maximum concurrent simulations reached');
-    err.status = 429;
-    throw err;
+    // If we hit limits, revert state to pending so it can be picked up later
+    await prisma.simulation.update({ where: { id: simulationId }, data: { state: 'pending', startedAt: null } });
+    console.log(`[Simulator] Reverting simulation ${simulationId} to pending due to concurrency limits.`);
+    return;
   }
 
   console.log(`[Simulator] Starting simulation: ${simulationId} (type: ${sim.failureType})`);
@@ -105,10 +112,6 @@ export async function runSimulation(simulationId: string): Promise<void> {
   const signal = activeRun.controller.signal;
   const startedAtMs = Date.now();
 
-  await prisma.simulation.update({
-    where: { id: simulationId },
-    data: { state: 'running', startedAt: new Date() },
-  });
   console.log(`[Simulator] Simulation ${simulationId} marked as RUNNING`);
 
   const ev = await prisma.failureEvent.findFirst({ where: { simulationId } });
@@ -349,16 +352,60 @@ export async function startSimulationWorker(): Promise<void> {
 
   try {
     const prisma = getPrismaClient();
-    const updated = await prisma.simulation.updateMany({
+    const runningSims = await prisma.simulation.findMany({
       where: { state: 'running' },
-      data: { state: 'failed', completedAt: new Date() }
+      include: { rollbackEntries: { where: { status: 'pending' } } }
     });
-    if (updated.count > 0) {
-      console.log(`[Worker] Marked ${updated.count} orphaned running simulations as failed.`);
-      await prisma.failureEvent.updateMany({
-        where: { state: 'running' },
-        data: { state: 'failed', endedAt: new Date(), errorMessage: 'Abandoned due to worker reboot' }
-      });
+
+    if (runningSims.length > 0) {
+      console.log(`[Worker] Found ${runningSims.length} orphaned running simulations. Attempting recovery...`);
+
+      const { replaceDeployment, scaleDeployment, replaceNetworkPolicy, deleteNetworkPolicy } = await import('../kubernetes/ops.js');
+
+      for (const sim of runningSims) {
+        console.log(`[Worker] Recovering simulation ${sim.id}...`);
+
+        // Execute pending rollbacks
+        for (const entry of sim.rollbackEntries) {
+          try {
+            console.log(`[Worker] Executing pending rollback action: ${entry.actionName} for ${entry.resourceName}`);
+            const data: any = entry.snapshotData;
+
+            if (entry.actionName === 'restore-deployment') {
+              await replaceDeployment(entry.namespace!, entry.resourceName!, data);
+            } else if (entry.actionName === 'restore-replicas') {
+              await scaleDeployment(entry.namespace!, entry.resourceName!, data.replicas);
+            } else if (entry.actionName === 'restore-networkpolicy') {
+              if (data) {
+                await replaceNetworkPolicy(entry.namespace!, entry.resourceName!, data);
+              } else {
+                await deleteNetworkPolicy(entry.namespace!, entry.resourceName!);
+              }
+            }
+
+            await prisma.rollbackEntry.update({
+              where: { id: entry.id },
+              data: { status: 'completed', completedAt: new Date() }
+            });
+          } catch (err: any) {
+            console.error(`[Worker] Failed to recover rollback entry ${entry.id}:`, err);
+            await prisma.rollbackEntry.update({
+              where: { id: entry.id },
+              data: { status: 'failed', error: err.message }
+            });
+          }
+        }
+
+        await prisma.simulation.update({
+          where: { id: sim.id },
+          data: { state: 'failed', completedAt: new Date() }
+        });
+
+        await prisma.failureEvent.updateMany({
+          where: { simulationId: sim.id, state: 'running' },
+          data: { state: 'failed', endedAt: new Date(), errorMessage: 'Recovered from crash; rollback executed.' }
+        });
+      }
     }
   } catch (e) {
     console.warn('[Worker] Failed to cleanup orphaned simulations', e);

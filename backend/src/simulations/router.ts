@@ -35,6 +35,18 @@ simulationsRouter.post('/', authMiddleware(['admin', 'engineer']), async (req: R
 
   const prisma = getPrismaClient();
   const user = (req as RequestWithUser).user!;
+  const config = await import('../config/env.js').then(m => m.loadConfig());
+
+  // Concurrency Guard — H-06
+  const runningCount = await prisma.simulation.count({ where: { state: 'running' } as any });
+  if (runningCount >= config.maxConcurrentSimulations) {
+    return res.status(429).json({
+      error: {
+        message: 'Maximum concurrent simulations reached. Please wait for active runs to complete.'
+      }
+    });
+  }
+
   const name = parsed.data.name ?? createSimulationName();
   const sim = await createSimulationRecord(user, {
     ...parsed.data,
@@ -74,14 +86,37 @@ simulationsRouter.post('/:id/stop', authMiddleware(['admin', 'engineer']), async
 simulationsRouter.get('/', authMiddleware(['admin', 'engineer', 'viewer']), async (req: Request, res: Response) => {
   const prisma = getPrismaClient();
   const user = (req as RequestWithUser).user!;
+  
+  const page = Math.max(1, parseInt(String(req.query.page || '1'), 10));
+  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '50'), 10)));
+  const skip = (page - 1) * limit;
+
   const where =
     user.role === 'admin'
       ? {}
       : {
-          createdById: user.id,
-        };
-  const sims = await prisma.simulation.findMany({ where, orderBy: { createdAt: 'desc' }, take: 50 });
-  return res.json({ simulations: sims });
+        createdById: user.id,
+      };
+
+  const [sims, total] = await Promise.all([
+    prisma.simulation.findMany({ 
+      where, 
+      orderBy: { createdAt: 'desc' }, 
+      skip, 
+      take: limit 
+    }),
+    prisma.simulation.count({ where })
+  ]);
+
+  return res.json({ 
+    simulations: sims,
+    pagination: {
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit)
+    }
+  });
 });
 
 // GET /api/simulations/:id
@@ -89,8 +124,8 @@ simulationsRouter.get('/:id', authMiddleware(['admin', 'engineer', 'viewer']), a
   const prisma = getPrismaClient();
   const id = String(req.params.id);
   const user = (req as RequestWithUser).user!;
-  
-  const sim = await prisma.simulation.findUnique({ 
+
+  const sim = await prisma.simulation.findUnique({
     where: { id },
     include: {
       steps: { orderBy: { timestamp: 'asc' } },
@@ -105,12 +140,12 @@ simulationsRouter.get('/:id', authMiddleware(['admin', 'engineer', 'viewer']), a
     return res.status(403).json({ error: { message: 'Forbidden' } });
   }
 
-  return res.json({ 
-    simulation: sim, 
+  return res.json({
+    simulation: sim,
     steps: sim.steps,
-    failureEvents: sim.failureEvents, 
-    recoveryActions: sim.recoveryActions, 
-    report: sim.reports[0] ?? null 
+    failureEvents: sim.failureEvents,
+    recoveryActions: sim.recoveryActions,
+    report: sim.reports[0] ?? null
   });
 });
 
