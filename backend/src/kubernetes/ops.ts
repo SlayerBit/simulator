@@ -35,18 +35,28 @@ export async function scaleDeployment(
   ref?: StepRef
 ): Promise<void> {
   const { apps } = getKubeClients();
-
   const start = Date.now();
+
   try {
     const appsApi = apps as AppsV1Api;
+
     await appsApi.patchNamespacedDeploymentScale(
       {
         name: deploymentName,
         namespace: namespace || 'default',
-        body: { spec: { replicas } },
+        body: {
+          spec: {
+            replicas
+          }
+        }
       },
-      { headers: { 'Content-Type': 'application/merge-patch+json' } } as any
+      {
+        headers: {
+          'Content-Type': 'application/merge-patch+json'
+        }
+      } as any
     );
+
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
@@ -62,6 +72,7 @@ export async function scaleDeployment(
         durationMs: Date.now() - start,
       });
     }
+
   } catch (e: any) {
     if (ref) {
       await recordSimulationStep({
@@ -78,6 +89,7 @@ export async function scaleDeployment(
         durationMs: Date.now() - start,
       });
     }
+
     throw e;
   }
 }
@@ -127,7 +139,7 @@ export async function replaceDeployment(
         durationMs: Date.now() - start,
       });
     }
-  } catch(e: any) {
+  } catch (e: any) {
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
@@ -162,7 +174,7 @@ export async function deletePodsBySelector(
       namespace: namespace || 'default',
       labelSelector,
     });
-    
+
     console.log(`[K8s Ops] Found pods for selector ${labelSelector}`);
     const items = res?.body?.items || res?.items || [];
 
@@ -192,7 +204,7 @@ export async function deletePodsBySelector(
       });
     }
     return items.length;
-  } catch(e: any) {
+  } catch (e: any) {
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
@@ -229,7 +241,11 @@ export async function patchDeploymentTemplate(
         namespace: namespace || 'default',
         body: patch.body,
       },
-      { headers: { 'Content-Type': patch.contentType } } as any
+      {
+        headers: {
+          'Content-Type': patch.contentType
+        }
+      } as any
     );
     if (ref) {
       await recordSimulationStep({
@@ -246,7 +262,7 @@ export async function patchDeploymentTemplate(
         durationMs: Date.now() - start,
       });
     }
-  } catch(e: any) {
+  } catch (e: any) {
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
@@ -410,7 +426,7 @@ export async function upsertNetworkPolicy(
         body: spec
       });
     }
-    
+
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
@@ -474,7 +490,7 @@ export async function deleteNetworkPolicy(
         durationMs: Date.now() - start,
       });
     }
-  } catch(e: any) {
+  } catch (e: any) {
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,

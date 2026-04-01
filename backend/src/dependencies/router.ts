@@ -9,7 +9,12 @@ export const dependenciesRouter = Router();
 dependenciesRouter.get('/', authMiddleware(['admin', 'engineer', 'viewer']), async (_req: Request, res: Response) => {
   const prisma = getPrismaClient();
   const edges = await prisma.dependencyEdge.findMany({ orderBy: { createdAt: 'desc' } });
-  const services = Array.from(new Set(edges.flatMap((e) => [e.fromService, e.toService]))).sort();
+  const services = Array.from(
+    new Set(edges.flatMap((e: { fromService: string; toService: string }) => [
+      e.fromService,
+      e.toService,
+    ]))
+  ).sort();
   return res.json({
     services,
     edges,

@@ -17,6 +17,9 @@ export function getKubeClients(): KubeClients {
   const kc = new KubeConfig();
   try {
     kc.loadFromCluster();
+    if (kc.getCurrentCluster()?.server?.includes('undefined')) {
+      throw new Error('Fallback to default required');
+    }
     console.log('[K8s] Loaded in-cluster config');
   } catch {
     kc.loadFromDefault();
