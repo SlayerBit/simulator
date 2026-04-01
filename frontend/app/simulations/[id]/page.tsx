@@ -41,10 +41,18 @@ export default function SimulationDetailPage() {
 
   useEffect(() => {
     if (!token) return;
+    let t: NodeJS.Timeout;
+    const terminalStates = ['completed', 'failed', 'cancelled', 'rolled_back'];
+
     const load = async () => {
       try {
         const d = await api.getSimulation(token, id);
         setData(d);
+        // If the simulation reached a terminal state, stop polling
+        if (d?.simulation && terminalStates.includes(d.simulation.state)) {
+          console.log(`[Frontend] Simulation ${id} reached terminal state "${d.simulation.state}". Stopping poll.`);
+          clearInterval(t);
+        }
       } catch (e: any) {
         setErr(e?.message ?? 'Failed to load');
       } finally {
@@ -52,7 +60,7 @@ export default function SimulationDetailPage() {
       }
     };
     void load();
-    const t = setInterval(() => void load(), 4000);
+    t = setInterval(() => void load(), 4000);
     return () => clearInterval(t);
   }, [token, id]);
 

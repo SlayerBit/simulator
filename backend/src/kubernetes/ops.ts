@@ -40,21 +40,23 @@ export async function scaleDeployment(
   try {
     const appsApi = apps as AppsV1Api;
 
-    await appsApi.patchNamespacedDeploymentScale(
+    await (appsApi as any).patchNamespacedDeploymentScale(
       {
         name: deploymentName,
         namespace: namespace || 'default',
-        body: {
-          spec: {
-            replicas
+        body: [
+          {
+            op: 'replace',
+            path: '/spec/replicas',
+            value: replicas
           }
-        }
+        ]
       },
       {
         headers: {
-          'Content-Type': 'application/merge-patch+json'
+          'Content-Type': 'application/json-patch+json'
         }
-      } as any
+      }
     );
 
     if (ref) {

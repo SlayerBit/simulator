@@ -12,15 +12,17 @@ import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { useAuth } from '@/hooks/useAuth';
 import { api } from '@/services/api';
+import type { Template } from '@/types';
 
 export default function TemplatesPage() {
   const router = useRouter(); 
   const { token, loading, user, logout } = useAuth();
-  const [templates, setTemplates] = useState<any[]>([]);
+  const [templates, setTemplates] = useState<Template[]>([]);
   const [busy, setBusy] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
-  const [editingTemplate, setEditingTemplate] = useState<any>(null);
+  const [editingTemplate, setEditingTemplate] = useState<Template | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
   const fetchTemplates = async () => {
     if (!token) return;
@@ -28,8 +30,10 @@ export default function TemplatesPage() {
     try {
       const res = await api.listTemplates(token);
       setTemplates(res.templates);
-    } catch (err) {
-      console.error('Failed to fetch templates', err);
+      setErr(null);
+    } catch (e: any) {
+      setErr(e?.message ?? 'Failed to fetch templates');
+      console.error('Failed to fetch templates', e);
     } finally {
       setBusy(false);
     }
@@ -76,6 +80,11 @@ export default function TemplatesPage() {
   return (
     <AppShell header={<AppHeader title="Templates" subtitle="Reusable failure experiment configurations." userLabel={user?.role ?? 'user'} onLogout={logout} canCreate={false} />}>
       <div className="mx-auto max-w-7xl animate-fade-in px-6">
+        {err ? (
+          <div className="mb-6 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-[13px] text-red-300">
+            {err}
+          </div>
+        ) : null}
         <div className="mb-6 flex items-center justify-between">
           <h2 className="text-lg font-medium text-slate-200">Predefined Templates</h2>
           {canManage && (
@@ -172,7 +181,7 @@ export default function TemplatesPage() {
                       <span className="text-slate-500">Duration</span>
                       <span className="text-slate-300 font-medium">{t.defaultDurationSeconds || 60}s</span>
                     </div>
-                    {t.schedules?.length > 0 && (
+                    {t.schedules && t.schedules.length > 0 && (
                       <div className="flex flex-wrap gap-1 pt-1 border-t border-slate-800/50 mt-1">
                         <span className="text-[10px] text-slate-600 w-full mb-1 uppercase tracking-tighter">Active Schedules</span>
                         {t.schedules.map((s: any) => (

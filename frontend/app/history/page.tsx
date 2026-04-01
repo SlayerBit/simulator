@@ -11,25 +11,41 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useAuth } from '@/hooks/useAuth';
 import { api } from '@/services/api';
+import type { Simulation } from '@/types';
 
 export default function HistoryPage() {
   const router = useRouter();
   const { token, loading, user, logout } = useAuth();
-  const [sims, setSims] = useState<any[]>([]);
+  const [sims, setSims] = useState<Simulation[]>([]);
   const [busy, setBusy] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => { if (!loading && !token) router.push('/login'); }, [loading, token, router]);
 
   useEffect(() => {
     if (!token) return;
-    api.listSimulations(token).then((r) => setSims(r.simulations)).catch(() => {}).finally(() => setBusy(false));
+    setBusy(true);
+    api.listSimulations(token)
+      .then((r) => {
+        setSims(r.simulations);
+        setErr(null);
+      })
+      .catch((e) => {
+        setErr(e?.message ?? 'Failed to load simulations');
+      })
+      .finally(() => setBusy(false));
   }, [token]);
 
   const variant = (s: string) => s === 'completed' ? 'success' : s === 'failed' ? 'error' : s === 'rolled_back' ? 'warning' : 'neutral';
 
   return (
     <AppShell header={<AppHeader title="Simulation History" subtitle="Past and present experiments." userLabel={user?.role ?? 'user'} onLogout={logout} canCreate={user?.role !== 'viewer'} />}>
-      <div className="mx-auto max-w-7xl animate-fade-in">
+      <div className="mx-auto max-w-7xl animate-fade-in px-6">
+        {err ? (
+          <div className="mb-6 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-[13px] text-red-300">
+            {err}
+          </div>
+        ) : null}
         {busy ? <Skeleton className="h-64 w-full" /> : sims.length === 0 ? (
           <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-800/60 py-16 text-center">
             <FileClock className="h-10 w-10 text-slate-600 mb-4" />

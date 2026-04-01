@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: simulator-frontend
+  namespace: simulator
+spec:
+  type: ClusterIP
+  selector:
+    app: simulator-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000

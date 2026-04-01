@@ -4,16 +4,32 @@ export type ApiError = {
   details?: unknown;
 };
 
+const TOKEN_KEY = 'simulator_token';
+
 export function getApiBaseUrl(): string {
-  return '';
+  return process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
 }
 
 async function request<T>(path: string, opts: RequestInit & { token?: string } = {}): Promise<T> {
-  const url = `${getApiBaseUrl()}${path.startsWith('/') ? path : `/${path}`}`;
+  // If the path already has /api, don't double prefix it.
+  const cleanPath = path.startsWith('/api') ? path.substring(4) : path;
+  const url = `${getApiBaseUrl()}${cleanPath.startsWith('/') ? cleanPath : `/${cleanPath}`}`;
   const headers = new Headers(opts.headers || {});
   headers.set('Content-Type', 'application/json');
-  if (opts.token) headers.set('Authorization', `Bearer ${opts.token}`);
+  
+  if (opts.token) {
+    headers.set('Authorization', `Bearer ${opts.token}`);
+  }
+
   const res = await fetch(url, { ...opts, headers, cache: 'no-store' });
+  
+  // 401 Handling
+  if (res.status === 401 && typeof window !== 'undefined' && !path.includes('/auth/login')) {
+    localStorage.removeItem(TOKEN_KEY);
+    window.location.href = '/login?expired=true';
+    throw new Error('Session expired');
+  }
+
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const err: ApiError = {

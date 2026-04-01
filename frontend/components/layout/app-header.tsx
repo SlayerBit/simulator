@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { ThemeSwitcher } from '@/components/layout/theme-switcher';
+import { MobileNav } from '@/components/layout/mobile-nav';
 
 export function AppHeader({
   title,
@@ -23,9 +24,14 @@ export function AppHeader({
   return (
     <header className="sticky top-0 z-20 border-b border-border/60 bg-background/80 backdrop-blur-xl">
       <div className="flex items-center justify-between px-6 py-4">
-        <div className="animate-fade-in">
-          <h1 className="text-xl font-semibold text-foreground tracking-tight">{title}</h1>
-          <p className="text-[13px] text-muted-foreground mt-0.5">{subtitle}</p>
+        <div className="flex items-center gap-3">
+          <MobileNav />
+          <div className="animate-fade-in group">
+            <h1 className="text-xl font-semibold text-foreground tracking-tight flex items-center gap-2">
+              {title}
+            </h1>
+            <p className="text-[13px] text-muted-foreground mt-0.5">{subtitle}</p>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {canCreate ? (

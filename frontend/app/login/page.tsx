@@ -39,21 +39,10 @@ export default function LoginPage() {
             <CardDescription>Sign in to your simulation control center.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-[13px] font-medium text-slate-300">Email</label>
-              <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" />
-            </div>
-            <div className="space-y-2">
-              <label className="text-[13px] font-medium text-slate-300">Password</label>
-              <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
-            </div>
-            {error ? (
-              <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[13px] text-red-300">{error}</div>
-            ) : null}
-            <Button
-              className="w-full bg-gradient-to-r from-indigo-500 to-violet-600 text-white border-0 hover:from-indigo-400 hover:to-violet-500 shadow-md shadow-indigo-500/20"
-              disabled={loading}
-              onClick={async () => {
+            <form 
+              className="space-y-4"
+              onSubmit={async (e) => {
+                e.preventDefault();
                 setLoading(true);
                 setError(null);
                 try {
@@ -66,8 +55,25 @@ export default function LoginPage() {
                 }
               }}
             >
-              {loading ? 'Signing in…' : 'Sign in'}
-            </Button>
+              <div className="space-y-2">
+                <label className="text-[13px] font-medium text-slate-300" htmlFor="email">Email</label>
+                <Input id="email" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-[13px] font-medium text-slate-300" htmlFor="password">Password</label>
+                <Input id="password" type="password" required value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+              </div>
+              {error ? (
+                <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[13px] text-red-300">{error}</div>
+              ) : null}
+              <Button
+                type="submit"
+                className="w-full bg-gradient-to-r from-indigo-500 to-violet-600 text-white border-0 hover:from-indigo-400 hover:to-violet-500 shadow-md shadow-indigo-500/20"
+                disabled={loading}
+              >
+                {loading ? 'Signing in…' : 'Sign in'}
+              </Button>
+            </form>
             <div className="text-center text-[13px] text-slate-500">
               No account?{' '}
               <a className="text-indigo-400 hover:text-indigo-300 transition-colors" href="/signup">

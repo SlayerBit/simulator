@@ -12,16 +12,18 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { useAuth } from '@/hooks/useAuth';
 import { api } from '@/services/api';
+import type { Schedule, Template } from '@/types';
 
 export default function SchedulesPage() {
   const router = useRouter();
   const { token, loading, user, logout } = useAuth();
-  const [schedules, setSchedules] = useState<any[]>([]);
-  const [templates, setTemplates] = useState<any[]>([]);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [templates, setTemplates] = useState<Template[]>([]);
   const [busy, setBusy] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
-  const [editingSchedule, setEditingSchedule] = useState<any>(null);
+  const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
   const fetchData = async () => {
     if (!token) return;
@@ -33,8 +35,10 @@ export default function SchedulesPage() {
       ]);
       setSchedules(sRes.schedules);
       setTemplates(tRes.templates);
-    } catch (err) {
-      console.error('Failed to fetch schedules', err);
+      setErr(null);
+    } catch (e: any) {
+      setErr(e?.message ?? 'Failed to load schedules');
+      console.error('Failed to fetch schedules', e);
     } finally {
       setBusy(false);
     }
@@ -82,6 +86,11 @@ export default function SchedulesPage() {
   return (
     <AppShell header={<AppHeader title="Schedules" subtitle="Cron-based recurring failure experiments." userLabel={user?.role ?? 'user'} onLogout={logout} canCreate={false} />}>
       <div className="mx-auto max-w-7xl animate-fade-in px-6">
+        {err ? (
+          <div className="mb-6 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-[13px] text-red-300">
+            {err}
+          </div>
+        ) : null}
         <div className="mb-6 flex items-center justify-between">
           <h2 className="text-lg font-medium text-slate-200">Recurring Simulations</h2>
           {canManage && (

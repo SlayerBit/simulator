@@ -12,12 +12,13 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useAuth } from '@/hooks/useAuth';
 import { api } from '@/services/api';
+import type { Simulation, SimulationState } from '@/types';
 
 export default function DashboardPage() {
   const router = useRouter();
   const { token, user, loading, logout } = useAuth();
-  const [sims, setSims] = useState<any[]>([]);
-  const [metrics, setMetrics] = useState<any>(null);
+  const [sims, setSims] = useState<Simulation[]>([]);
+  const [metrics, setMetrics] = useState<any>(null); // metrics has many fields, keep any for now or define interface
   const [busy, setBusy] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
