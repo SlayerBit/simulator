@@ -38,16 +38,6 @@ simulationsRouter.post('/', authMiddleware(['admin', 'engineer']), async (req: R
   const user = (req as RequestWithUser).user!;
   const config = await import('../config/env.js').then(m => m.loadConfig());
 
-  // Concurrency Guard — H-06
-  const runningCount = await prisma.simulation.count({ where: { state: 'running' } as any });
-  if (runningCount >= config.maxConcurrentSimulations) {
-    return res.status(429).json({
-      error: {
-        message: 'Maximum concurrent simulations reached. Please wait for active runs to complete.'
-      }
-    });
-  }
-
   const name = parsed.data.name ?? createSimulationName();
   const sim = await createSimulationRecord(user, {
     ...parsed.data,

@@ -98,15 +98,18 @@ export async function runSimulation(simulationId: string): Promise<void> {
     return;
   }
 
-  const result = await prisma.simulation.updateMany({
+  console.log(`[Simulator:${simulationId}] Claim attempt`);
+  const claimed = await prisma.simulation.updateMany({
     where: { id: simulationId, state: { in: ['pending', 'queued'] } as any },
     data: { state: 'running', startedAt: new Date() },
   });
 
-  if (result.count === 0) {
-    console.log(`[Simulator:${simulationId}] [Concurrency] SKIPPED: Simulation was not in a claimable state (pending/queued) or already claimed.`);
+  if (claimed.count === 0) {
+    const s = await prisma.simulation.findUnique({ where: { id: simulationId } });
+    console.log(`[Simulator:${simulationId}] Claim skipped (already claimed or invalid state: ${s?.state})`);
     return;
   }
+  console.log(`[Simulator:${simulationId}] Claim success`);
 
   const sim = await prisma.simulation.findUnique({ where: { id: simulationId } });
   if (!sim) throw new Error('Simulation disappeared during claim');
@@ -508,9 +511,10 @@ export async function startSimulationWorker(): Promise<void> {
 
   // Periodically check for queued/pending simulations and stale runs
   const poll = async () => {
-    console.log('[Simulator:Worker] [Worker] Checking simulations...');
+    console.log('[Simulator:Worker] Poll cycle started');
     try {
       const prisma = getPrismaClient();
+      const config = loadConfig();
 
       // 1. Check for stale RUNNING simulations (> 10 mins)
       const staleThreshold = new Date(Date.now() - 10 * 60 * 1000);
@@ -519,25 +523,51 @@ export async function startSimulationWorker(): Promise<void> {
       });
 
       for (const s of staleSims) {
-        console.log(`[Simulator:${s.id}] [Timeout] Triggering force-failure due to 10m timeout.`);
-        // Force failure logic
+        console.log(`[Simulator:${s.id}] [Timeout] Janitor: Triggering force-failure for stale RUNNING simulations (>10m).`);
         void stopSimulation(s.id, { id: 'system', email: 'system@simulator.local', role: 'admin' }).catch(err => {
-          console.error(`[Simulator:${s.id}] [Timeout] Failed to auto-stop stale simulation:`, err);
+          console.error(`[Simulator:${s.id}] [Timeout] Janitor: Failed to auto-stop stale simulation:`, err);
         });
       }
 
-      // 2. Fetch QUEUED first (priority), then PENDING
+      // 2. Check for stale FAILURE_ACTIVE simulations (exceeded duration + 10m buffer)
+      const activeFailures = await prisma.simulation.findMany({
+        where: { state: 'failure_active' },
+      });
+
+      for (const s of activeFailures) {
+        if (!s.startedAt) continue;
+        const expectedEndTime = new Date(s.startedAt.getTime() + s.durationSeconds * 1000);
+        if (Date.now() > expectedEndTime.getTime() + 10 * 60 * 1000) {
+          console.log(`[Simulator:${s.id}] [Timeout] Janitor: Triggering emergency rollback for stale FAILURE_ACTIVE simulation.`);
+          void stopSimulation(s.id, { id: 'system', email: 'system@simulator.local', role: 'admin' }).catch(err => {
+            console.error(`[Simulator:${s.id}] [Timeout] Janitor: Failed to emergency rollback stale simulation:`, err);
+          });
+        }
+      }
+
+      // 3. Fetch QUEUED first (priority), then PENDING
       const candidates = await prisma.simulation.findMany({
         where: { state: { in: ['queued', 'pending'] } as any },
         orderBy: [
-          { state: 'desc' }, // 'queued' (q) comes before 'pending' (p) in desc order? No, q > p. Yes.
+          { state: 'desc' }, // 'queued' (q) comes before 'pending' (p) in desc order.
           { createdAt: 'asc' }
         ],
         take: 10,
       });
 
-      if (candidates.length > 0) {
-        console.log(`[Simulator:Worker] [Worker] Found ${candidates.length} candidate simulations (queued/pending).`);
+      if (candidates.length === 0) {
+        // Reduced noise but keeps heartbeat visible
+        const counts = await prisma.simulation.groupBy({
+          by: ['state'],
+          where: { state: { in: ['queued', 'pending', 'running', 'failed', 'completed'] } as any },
+          _count: true
+        });
+        const stateStr = counts.map((c: any) => `${c.state}:${c._count}`).join(', ') || 'none';
+        console.log(`[Simulator:Worker] Running count: ${countActiveRuns()}/${config.maxConcurrentSimulations}`);
+        console.log(`[Simulator:Worker] Candidates found: 0 (Global stats: ${stateStr})`);
+      } else {
+        console.log(`[Simulator:Worker] Running count: ${countActiveRuns()}/${config.maxConcurrentSimulations}`);
+        console.log(`[Simulator:Worker] Candidates found: ${candidates.length}`);
       }
 
       for (const sim of candidates) {
@@ -556,6 +586,7 @@ export async function startSimulationWorker(): Promise<void> {
     void poll();
   }, 30000);
 
-  // Initial immediate run
+  // Initial immediate run (Startup Recovery)
+  console.log('[Simulator:Worker] Startup recovery running...');
   void poll();
 }
