@@ -43,6 +43,7 @@ export default function NewSimulationPage() {
   const [latencyMs, setLatencyMs] = useState<number | undefined>(undefined);
   const [packetLossPercent, setPacketLossPercent] = useState<number | undefined>(undefined);
   const [dryRun, setDryRun] = useState(true);
+  const [manualRollback, setManualRollback] = useState(false);
   const [saveAsTemplate, setSaveAsTemplate] = useState(false);
   const [templateName, setTemplateName] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -105,6 +106,7 @@ export default function NewSimulationPage() {
         ...(typeof latencyMs === 'number' ? { latencyMs } : {}),
         ...(typeof packetLossPercent === 'number' ? { packetLossPercent } : {}),
         dryRun,
+        manualRollback,
       };
 
       if (saveAsTemplate) {
@@ -218,6 +220,14 @@ export default function NewSimulationPage() {
                 <div>
                   <div className="text-sm font-medium text-slate-200">Dry-run mode</div>
                   <div className="text-[12px] text-slate-500">Recommended for first execution in a namespace</div>
+                </div>
+              </label>
+
+              <label className="flex items-center gap-3 rounded-lg bg-slate-800/30 border border-slate-800/40 px-4 py-3 cursor-pointer transition-colors hover:bg-slate-800/50">
+                <input type="checkbox" checked={manualRollback} onChange={(e) => setManualRollback(e.target.checked)} className="accent-indigo-500 h-4 w-4" />
+                <div>
+                  <div className="text-sm font-medium text-slate-200">Manual Recovery</div>
+                  <div className="text-[12px] text-slate-500">Failure persists until you click "Rollback" manually.</div>
                 </div>
               </label>
 

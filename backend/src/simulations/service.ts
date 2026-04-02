@@ -6,6 +6,7 @@ import type { FailureParams } from '../failures/types.js';
 import { RollbackStack } from '../recovery/rollback.js';
 import { countActiveRuns, endActiveRun, getActiveRun, registerActiveRun } from './active-runs.js';
 import { loadConfig } from '../config/env.js';
+import { replaceDeployment, scaleDeployment, replaceNetworkPolicy, deleteNetworkPolicy } from '../kubernetes/ops.js';
 import { clearSimStepCounter } from './steps.js';
 
 export interface CreateSimulationInput {
@@ -18,6 +19,7 @@ export interface CreateSimulationInput {
   latencyMs?: number | undefined;
   packetLossPercent?: number | undefined;
   dryRun: boolean;
+  manualRollback?: boolean;
 }
 
 export async function createSimulationRecord(user: UserIdentity, input: CreateSimulationInput) {
@@ -34,6 +36,7 @@ export async function createSimulationRecord(user: UserIdentity, input: CreateSi
       labelSelector: input.target.labelSelector ?? null,
       intensity: input.intensityPercent != null ? String(input.intensityPercent) : input.latencyMs != null ? `${input.latencyMs}ms` : null,
       durationSeconds: input.durationSeconds,
+      manualRollback: input.manualRollback ?? false,
       dryRun: input.dryRun,
       createdById: user.id,
     },
@@ -201,6 +204,18 @@ export async function runSimulation(simulationId: string): Promise<void> {
 
     await failureMethod.apply(params);
 
+    // Update isRollbackable bit (S-07)
+    await prisma.simulation.update({
+      where: { id: simulationId },
+      data: { isRollbackable: true }
+    });
+
+    if (sim.manualRollback) {
+      console.log(`[Simulator] Simulation ${simulationId} is Manual Recovery mode. Skipping automatic rollback.`);
+      // We keep it in 'running' state. The user must call the rollback endpoint.
+      return;
+    }
+
     // Wait for duration, then rollback.
     await sleepOrAbort(sim.durationSeconds * 1000);
 
@@ -345,6 +360,64 @@ function parsePacketLoss(_intensity: string | null): number | undefined {
 
 export function createSimulationName(prefix = 'sim'): string {
   return `${prefix}-${nanoid(8)}`;
+}
+
+export async function rollbackSimulation(simulationId: string, user: UserIdentity): Promise<void> {
+  const prisma = getPrismaClient();
+  const sim = await prisma.simulation.findUnique({
+    where: { id: simulationId },
+    include: { rollbackEntries: { where: { status: 'pending' } } }
+  });
+
+  if (!sim) throw new Error('Simulation not found');
+  if (!sim.isRollbackable) throw new Error('No pending rollback actions for this simulation');
+
+  console.log(`[Rollback] Manually rolling back simulation ${sim.id} by user ${user.id}`);
+
+  for (const entry of sim.rollbackEntries) {
+    try {
+      console.log(`[Rollback] Executing action: ${entry.actionName} for ${entry.resourceName}`);
+      const data: any = entry.snapshotData;
+
+      if (entry.actionName === 'restore-deployment') {
+        await replaceDeployment(entry.namespace!, entry.resourceName!, data);
+      } else if (entry.actionName === 'restore-replicas') {
+        await scaleDeployment(entry.namespace!, entry.resourceName!, Number(data.replicas));
+      } else if (entry.actionName === 'restore-networkpolicy') {
+        if (data) {
+          await replaceNetworkPolicy(entry.namespace!, entry.resourceName!, data);
+        } else {
+          await deleteNetworkPolicy(entry.namespace!, entry.resourceName!);
+        }
+      }
+
+      await prisma.rollbackEntry.update({
+        where: { id: entry.id },
+        data: { status: 'completed', completedAt: new Date() }
+      });
+    } catch (err: any) {
+      console.error(`[Rollback] Failed to execute rollback entry ${entry.id}:`, err);
+      await prisma.rollbackEntry.update({
+        where: { id: entry.id },
+        data: { status: 'failed', error: err.message }
+      });
+      throw new Error(`Rollback failed: ${err.message}`);
+    }
+  }
+
+  await prisma.simulation.update({
+    where: { id: sim.id },
+    data: { state: 'completed', isRollbackable: false, completedAt: new Date() }
+  });
+
+  await prisma.auditLog.create({
+    data: {
+      userId: user.id,
+      action: 'simulation.manual_rollback',
+      simulationId: sim.id,
+      metadata: { by: user.id },
+    },
+  });
 }
 
 export async function startSimulationWorker(): Promise<void> {

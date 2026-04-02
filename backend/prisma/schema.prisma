@@ -31,6 +31,8 @@ model Simulation {
   labelSelector    String?
   intensity        String?
   durationSeconds  Int
+  manualRollback   Boolean   @default(false)
+  isRollbackable   Boolean   @default(false)
   dryRun           Boolean   @default(false)
   createdAt        DateTime  @default(now())
   startedAt        DateTime?

@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { authMiddleware, type RequestWithUser } from '../auth/service.js';
 import { getPrismaClient } from '../database/client.js';
 import type { FailureType } from '../types/domain.js';
-import { createSimulationName, createSimulationRecord, runSimulation, stopSimulation } from './service.js';
+import { createSimulationName, createSimulationRecord, runSimulation, stopSimulation, rollbackSimulation } from './service.js';
 
 export const simulationsRouter = Router();
 
@@ -24,6 +24,7 @@ const CreateSimulationSchema = z.object({
   latencyMs: z.number().int().min(10).max(60000).optional(),
   packetLossPercent: z.number().int().min(1).max(100).optional(),
   dryRun: z.boolean().default(false),
+  manualRollback: z.boolean().default(false),
 });
 
 // POST /api/simulations
@@ -80,6 +81,18 @@ simulationsRouter.post('/:id/stop', authMiddleware(['admin', 'engineer']), async
   }
   await stopSimulation(id, user);
   return res.status(200).json({ id, status: 'cancelled' });
+});
+
+// POST /api/simulations/:id/rollback
+simulationsRouter.post('/:id/rollback', authMiddleware(['admin', 'engineer']), async (req: Request, res: Response) => {
+  const id = String(req.params.id);
+  const user = (req as RequestWithUser).user!;
+  try {
+    await rollbackSimulation(id, user);
+    return res.status(200).json({ id, status: 'completed' });
+  } catch (e: any) {
+    return res.status(400).json({ error: { message: e.message ?? String(e) } });
+  }
 });
 
 // GET /api/simulations

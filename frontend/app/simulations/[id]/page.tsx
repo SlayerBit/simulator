@@ -34,6 +34,7 @@ export default function SimulationDetailPage() {
   const [busy, setBusy] = useState(true);
   const [cancelOpen, setCancelOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<TabId>('overview');
+  const [rollingBack, setRollingBack] = useState(false);
 
   useEffect(() => {
     if (!loading && !token) router.push('/login');
@@ -112,6 +113,31 @@ export default function SimulationDetailPage() {
             <Button variant="outline" size="sm" onClick={() => router.push('/dashboard')} className="gap-1.5 border-slate-700 bg-slate-900/50">
               <ArrowLeft className="h-3.5 w-3.5" /> Dashboard
             </Button>
+            
+            {sim?.manualRollback && sim?.isRollbackable && (
+              <Button 
+                variant="default" 
+                size="sm" 
+                disabled={rollingBack || state !== 'running'} 
+                onClick={async () => {
+                  if (!token) return;
+                  setRollingBack(true);
+                  try {
+                    await api.rollbackSimulation(token, id);
+                    // Reload data will be handled by the poll
+                  } catch (e: any) {
+                    setErr(e.message ?? 'Rollback failed');
+                  } finally {
+                    setRollingBack(false);
+                  }
+                }}
+                className="gap-1.5 bg-amber-600 hover:bg-amber-500 border-0 text-white"
+              >
+                <RotateCcw className={cn("h-3.5 w-3.5", rollingBack && "animate-spin")} /> 
+                {rollingBack ? 'Rolling back...' : 'Rollback'}
+              </Button>
+            )}
+
             <Dialog open={cancelOpen} onOpenChange={(v: boolean) => setCancelOpen(v)}>
               <DialogTrigger asChild>
                 <Button variant="destructive" size="sm" disabled={!canStop || ['completed', 'failed', 'cancelled', 'rolled_back'].includes(state)} className="gap-1.5">

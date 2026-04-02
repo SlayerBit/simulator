@@ -8,6 +8,19 @@ export interface StepRef {
   failureType: string;
 }
 
+const DEFAULT_TIMEOUT_MS = 30000;
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+  let timeoutId: NodeJS.Timeout;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`Operation timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
+}
+
 
 export interface PatchSpec {
   body: unknown;
@@ -39,24 +52,27 @@ export async function scaleDeployment(
 
   try {
     const appsApi = apps as AppsV1Api;
-
-    await (appsApi as any).patchNamespacedDeploymentScale(
-      {
-        name: deploymentName,
-        namespace: namespace || 'default',
-        body: [
-          {
-            op: 'replace',
-            path: '/spec/replicas',
-            value: replicas
+    console.log(`[K8s Ops] Scaling deployment ${deploymentName} in ${namespace || 'default'} to ${replicas}...`);
+    
+    await withTimeout(
+      (appsApi as any).patchNamespacedDeploymentScale(
+        {
+          name: deploymentName,
+          namespace: namespace || 'default',
+          body: [
+            {
+              op: 'replace',
+              path: '/spec/replicas',
+              value: replicas
+            }
+          ]
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json-patch+json'
           }
-        ]
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json-patch+json'
         }
-      }
+      )
     );
 
     if (ref) {
@@ -102,10 +118,11 @@ export async function readDeployment(
 ): Promise<any> {
   const { apps } = getKubeClients();
 
-  const dep = await (apps as any).readNamespacedDeployment({
+  console.log(`[K8s Ops] Reading deployment ${deploymentName} in ${namespace || 'default'}...`);
+  const dep = await withTimeout((apps as any).readNamespacedDeployment({
     name: deploymentName,
     namespace: namespace || 'default',
-  });
+  })) as any;
 
   return dep.body ?? dep;
 }
@@ -121,11 +138,12 @@ export async function replaceDeployment(
   const start = Date.now();
   try {
     const appsApi = apps as AppsV1Api;
-    await appsApi.replaceNamespacedDeployment({
+    console.log(`[K8s Ops] Replacing deployment ${deploymentName} in ${namespace || 'default'}...`);
+    await withTimeout(appsApi.replaceNamespacedDeployment({
       name: deploymentName,
       namespace: namespace || 'default',
       body,
-    });
+    }));
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
@@ -171,11 +189,12 @@ export async function deletePodsBySelector(
   try {
     console.log(`[K8s Ops] Listing pods for namespace: ${namespace || 'default'}, selector: ${labelSelector}`);
     const coreApi = core as any;
-    // Try both styles in a fallback manner if needed, but let's try the modern style first correctly.
-    const res = await coreApi.listNamespacedPod({
+    console.log(`[K8s Ops] Listing pods for namespace: ${namespace || 'default'}, selector: ${labelSelector}`);
+    
+    const res = await withTimeout(coreApi.listNamespacedPod({
       namespace: namespace || 'default',
       labelSelector,
-    });
+    })) as any;
 
     console.log(`[K8s Ops] Found pods for selector ${labelSelector}`);
     const items = res?.body?.items || res?.items || [];
@@ -184,10 +203,11 @@ export async function deletePodsBySelector(
       if (!pod?.metadata?.name) continue;
 
       const coreApi = core as CoreV1Api;
-      await coreApi.deleteNamespacedPod({
+      console.log(`[K8s Ops] Deleting pod ${pod.metadata.name!} in ${namespace || 'default'}...`);
+      await withTimeout(coreApi.deleteNamespacedPod({
         name: pod.metadata.name!,
         namespace: namespace || 'default',
-      });
+      }));
     }
 
     if (ref) {
@@ -237,7 +257,8 @@ export async function patchDeploymentTemplate(
 
   try {
     const appsApi = apps as AppsV1Api;
-    await appsApi.patchNamespacedDeployment(
+    console.log(`[K8s Ops] Patching deployment ${deploymentName} in ${namespace || 'default'}...`);
+    await withTimeout(appsApi.patchNamespacedDeployment(
       {
         name: deploymentName,
         namespace: namespace || 'default',
@@ -248,7 +269,7 @@ export async function patchDeploymentTemplate(
           'Content-Type': patch.contentType
         }
       } as any
-    );
+    ));
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
@@ -312,10 +333,11 @@ export async function applyNetworkPolicy(
   const start = Date.now();
 
   try {
-    await (net as any).createNamespacedNetworkPolicy({
+    console.log(`[K8s Ops] Creating NetworkPolicy ${body.metadata?.name ?? 'unknown'} in ${namespace || 'default'}...`);
+    await withTimeout((net as any).createNamespacedNetworkPolicy({
       namespace: namespace || 'default',
       body,
-    });
+    }));
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
@@ -361,11 +383,12 @@ export async function replaceNetworkPolicy(
   const start = Date.now();
 
   try {
-    await (net as any).replaceNamespacedNetworkPolicy({
+    console.log(`[K8s Ops] Replacing NetworkPolicy ${policyName} in ${namespace || 'default'}...`);
+    await withTimeout((net as any).replaceNamespacedNetworkPolicy({
       name: policyName,
       namespace: namespace || 'default',
       body,
-    });
+    }));
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
@@ -473,10 +496,11 @@ export async function deleteNetworkPolicy(
   const start = Date.now();
 
   try {
-    await (net as any).deleteNamespacedNetworkPolicy({
+    console.log(`[K8s Ops] Deleting NetworkPolicy ${policyName} in ${namespace || 'default'}...`);
+    await withTimeout((net as any).deleteNamespacedNetworkPolicy({
       name: policyName,
       namespace: namespace || 'default'
-    });
+    }));
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
