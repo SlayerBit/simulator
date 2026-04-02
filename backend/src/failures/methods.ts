@@ -11,6 +11,8 @@ import {
   replaceNetworkPolicy,
   scaleDeployment,
   upsertNetworkPolicy,
+  listPodsBySelector,
+  execCommandInPod,
   type StepRef,
 } from '../kubernetes/ops.js';
 import { recordSimulationStep } from '../simulations/steps.js';
@@ -756,15 +758,46 @@ const netLatencyEnv: FailureMethod = {
     if (p.dryRun) return ok('Dry-run: would patch HTTP_LATENCY_MS');
     const dep = requireDeployment(p);
     await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    
+    // Hard Chaos Attempt: tc netem (Requires CAP_NET_ADMIN)
+    try {
+        const pods = await listPodsBySelector(p.target.namespace, p.target.labelSelector || `app=${dep}`);
+        for (const pod of pods) {
+            if (pod.metadata?.name) {
+                console.log(`[Simulator:${p.simulationId}] [Chaos] Attempting tc injection on pod ${pod.metadata.name}`);
+                const res = await execCommandInPod(p.target.namespace, pod.metadata.name, dep, 
+                    ['sh', '-c', `tc qdisc add dev eth0 root netem delay ${p.latencyMs}ms`], ref);
+                if (res.code !== 0) {
+                    console.warn(`[Simulator:${p.simulationId}] [Chaos] tc injection failed (likely missing CAP_NET_ADMIN): ${res.stderr}`);
+                }
+            }
+        }
+    } catch (err) {
+        console.warn(`[Simulator:${p.simulationId}] [Chaos] Failed to execute tc injection:`, err);
+    }
+
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
-      body: { spec: { template: { spec: { containers: [{ env: [{ name: 'HTTP_LATENCY_MS', value: String(p.latencyMs) }] }] } } } },
+      body: { spec: { template: { spec: { containers: [{ name: dep, env: [{ name: 'HTTP_LATENCY_MS', value: String(p.latencyMs) }] }] } } } },
     }, ref);
-    return ok('Injected HTTP_LATENCY_MS');
+    return ok('Injected HTTP_LATENCY_MS (Soft Chaos) and attempted tc (Hard Chaos)');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    const dep = requireDeployment(p);
+
+    // Rollback Hard Chaos: tc qdisc del
+    try {
+        const pods = await listPodsBySelector(p.target.namespace, p.target.labelSelector || `app=${dep}`);
+        for (const pod of pods) {
+            if (pod.metadata?.name) {
+                await execCommandInPod(p.target.namespace, pod.metadata.name, dep, 
+                    ['sh', '-c', 'tc qdisc del dev eth0 root'], ref);
+            }
+        }
+    } catch (err) { /* ignore rollback errors if pod already gone */ }
+
+    await restoreDeployment(p.simulationId, p.target.namespace, dep, ref);
   },
 };
 
@@ -885,15 +918,44 @@ const pktLossEnv: FailureMethod = {
     if (p.dryRun) return ok('Dry-run: would patch PACKET_LOSS_PERCENT');
     const dep = requireDeployment(p);
     await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+
+    // Hard Chaos Attempt: tc netem loss (Requires CAP_NET_ADMIN)
+    try {
+        const pods = await listPodsBySelector(p.target.namespace, p.target.labelSelector || `app=${dep}`);
+        for (const pod of pods) {
+            if (pod.metadata?.name) {
+                console.log(`[Simulator:${p.simulationId}] [Chaos] Attempting tc loss injection on pod ${pod.metadata.name}`);
+                const res = await execCommandInPod(p.target.namespace, pod.metadata.name, dep, 
+                    ['sh', '-c', `tc qdisc add dev eth0 root netem loss ${p.packetLossPercent}%`], ref);
+                if (res.code !== 0) {
+                    console.warn(`[Simulator:${p.simulationId}] [Chaos] tc injection failed: ${res.stderr}`);
+                }
+            }
+        }
+    } catch (err) { /* ignore */ }
+
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
-      body: { spec: { template: { spec: { containers: [{ env: [{ name: 'PACKET_LOSS_PERCENT', value: String(p.packetLossPercent) }] }] } } } },
+      body: { spec: { template: { spec: { containers: [{ name: dep, env: [{ name: 'PACKET_LOSS_PERCENT', value: String(p.packetLossPercent) }] }] } } } },
     }, ref);
-    return ok('Injected PACKET_LOSS_PERCENT');
+    return ok('Injected PACKET_LOSS_PERCENT (Soft Chaos) and attempted tc (Hard Chaos)');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    const dep = requireDeployment(p);
+
+    // Rollback Hard Chaos
+    try {
+        const pods = await listPodsBySelector(p.target.namespace, p.target.labelSelector || `app=${dep}`);
+        for (const pod of pods) {
+            if (pod.metadata?.name) {
+                await execCommandInPod(p.target.namespace, pod.metadata.name, dep, 
+                    ['sh', '-c', 'tc qdisc del dev eth0 root'], ref);
+            }
+        }
+    } catch (err) { /* ignore */ }
+
+    await restoreDeployment(p.simulationId, p.target.namespace, dep, ref);
   },
 };
 
@@ -1014,6 +1076,12 @@ const cpuEnvLoop: FailureMethod = {
     if (p.dryRun) return ok('Dry-run: would patch CPU_HOG');
     const dep = requireDeployment(p);
     await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+
+    // Hard Chaos: Patch CPU limits based on intensity
+    // map intensity 0-100 to cpu limits. e.g. 80% intensity -> limit 20% of current or fixed low.
+    // Simplifying: If intensity > 50, set limit to 100m.
+    const cpuLimit = p.intensityPercent && p.intensityPercent > 70 ? '100m' : '500m';
+
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: {
@@ -1022,6 +1090,11 @@ const cpuEnvLoop: FailureMethod = {
             spec: {
               containers: [
                 {
+                  name: dep, // Assume container name matches deployment
+                  resources: {
+                    limits: { cpu: cpuLimit },
+                    requests: { cpu: '10m' }
+                  },
                   env: [
                     { name: 'CPU_HOG', value: '1' },
                     { name: 'CPU_HOG_INTENSITY', value: String(p.intensityPercent) },

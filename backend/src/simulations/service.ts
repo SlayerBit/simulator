@@ -88,34 +88,36 @@ export async function runSimulation(simulationId: string): Promise<void> {
     throw err;
   }
 
+  const currentActive = countActiveRuns();
+  if (currentActive >= config.maxConcurrentSimulations) {
+    console.log(`[Simulator:${simulationId}] [Concurrency] QUEUED: System at capacity (${currentActive}/${config.maxConcurrentSimulations})`);
+    await prisma.simulation.update({
+      where: { id: simulationId },
+      data: { state: 'queued', startedAt: null }
+    });
+    return;
+  }
+
   const result = await prisma.simulation.updateMany({
-    where: { id: simulationId, state: 'pending' },
+    where: { id: simulationId, state: { in: ['pending', 'queued'] } as any },
     data: { state: 'running', startedAt: new Date() },
   });
 
   if (result.count === 0) {
-    console.log(`[Simulator] Simulation ${simulationId} was not in 'pending' state or already claimed.`);
+    console.log(`[Simulator:${simulationId}] [Concurrency] SKIPPED: Simulation was not in a claimable state (pending/queued) or already claimed.`);
     return;
   }
 
   const sim = await prisma.simulation.findUnique({ where: { id: simulationId } });
   if (!sim) throw new Error('Simulation disappeared during claim');
 
-  const runningCount = await prisma.simulation.count({ where: { state: 'running' } as any });
-  if (runningCount + countActiveRuns() >= config.maxConcurrentSimulations) {
-    // If we hit limits, revert state to pending so it can be picked up later
-    await prisma.simulation.update({ where: { id: simulationId }, data: { state: 'pending', startedAt: null } });
-    console.log(`[Simulator] Reverting simulation ${simulationId} to pending due to concurrency limits.`);
-    return;
-  }
-
-  console.log(`[Simulator] Starting simulation: ${simulationId} (type: ${sim.failureType})`);
+  console.log(`[Simulator:${simulationId}] Starting simulation: ${simulationId} (type: ${sim.failureType})`);
   const rollback = new RollbackStack();
   const activeRun = registerActiveRun(simulationId);
   const signal = activeRun.controller.signal;
   const startedAtMs = Date.now();
 
-  console.log(`[Simulator] Simulation ${simulationId} marked as RUNNING`);
+  console.log(`[Simulator:${simulationId}] Simulation ${simulationId} marked as RUNNING`);
 
   const ev = await prisma.failureEvent.findFirst({ where: { simulationId } });
   const methodId = ev?.method ?? 'unknown';
@@ -211,7 +213,7 @@ export async function runSimulation(simulationId: string): Promise<void> {
     });
 
     if (sim.manualRollback) {
-      console.log(`[Simulator] Simulation ${simulationId} is Manual Recovery mode. Skipping automatic rollback.`);
+      console.log(`[Simulator:${simulationId}] Simulation ${simulationId} is Manual Recovery mode. Skipping automatic rollback.`);
       // We keep it in 'running' state. The user must call the rollback endpoint.
       return;
     }
@@ -284,7 +286,7 @@ export async function runSimulation(simulationId: string): Promise<void> {
         errors: `${e?.message ?? String(e)}; rollback: ${rb.errors.join('; ')}`,
       } as any,
     });
-    console.error(`[Simulator] Simulation ${simulationId} FAILED:`, e);
+    console.error(`[Simulator:${simulationId}] Simulation ${simulationId} FAILED:`, e);
     throw e;
   } finally {
     await prisma.recoveryAction.create({
@@ -372,11 +374,15 @@ export async function rollbackSimulation(simulationId: string, user: UserIdentit
   if (!sim) throw new Error('Simulation not found');
   if (!sim.isRollbackable) throw new Error('No pending rollback actions for this simulation');
 
-  console.log(`[Rollback] Manually rolling back simulation ${sim.id} by user ${user.id}`);
+  console.log(`[Simulator:${sim.id}] [Rollback] Manually rolling back simulation by user ${user.id}`);
 
   for (const entry of sim.rollbackEntries) {
+    if (entry.status === 'completed') {
+      console.log(`[Simulator:${sim.id}] [Rollback] Skipping already completed entry ${entry.id}`);
+      continue;
+    }
     try {
-      console.log(`[Rollback] Executing action: ${entry.actionName} for ${entry.resourceName}`);
+      console.log(`[Simulator:${sim.id}] [Rollback] Executing action: ${entry.actionName} for ${entry.resourceName}`);
       const data: any = entry.snapshotData;
 
       if (entry.actionName === 'restore-deployment') {
@@ -396,7 +402,7 @@ export async function rollbackSimulation(simulationId: string, user: UserIdentit
         data: { status: 'completed', completedAt: new Date() }
       });
     } catch (err: any) {
-      console.error(`[Rollback] Failed to execute rollback entry ${entry.id}:`, err);
+      console.error(`[Simulator:${sim.id}] [Rollback] Failed to execute rollback entry ${entry.id}:`, err);
       await prisma.rollbackEntry.update({
         where: { id: entry.id },
         data: { status: 'failed', error: err.message }
@@ -421,7 +427,7 @@ export async function rollbackSimulation(simulationId: string, user: UserIdentit
 }
 
 export async function startSimulationWorker(): Promise<void> {
-  console.log("[Worker] started");
+  console.log("[Simulator:Worker] [Worker] started");
 
   try {
     const prisma = getPrismaClient();
@@ -431,23 +437,23 @@ export async function startSimulationWorker(): Promise<void> {
     });
 
     if (runningSims.length > 0) {
-      console.log(`[Worker] Found ${runningSims.length} orphaned running simulations. Attempting recovery...`);
+      console.log(`[Simulator:Worker] [Worker] Found ${runningSims.length} orphaned running simulations. Attempting recovery...`);
 
       const { replaceDeployment, scaleDeployment, replaceNetworkPolicy, deleteNetworkPolicy } = await import('../kubernetes/ops.js');
 
       for (const sim of runningSims) {
-        console.log(`[Worker] Recovering simulation ${sim.id}...`);
+        console.log(`[Simulator:${sim.id}] [Worker] Recovering orphaned running simulation.`);
 
-        // Execute pending rollbacks
+        // Execute pending rollbacks (C-05)
         for (const entry of sim.rollbackEntries) {
           try {
-            console.log(`[Worker] Executing pending rollback action: ${entry.actionName} for ${entry.resourceName}`);
+            console.log(`[Simulator:${sim.id}] [Recovery] Executing rollback action: ${entry.actionName} for ${entry.resourceName}`);
             const data: any = entry.snapshotData;
 
             if (entry.actionName === 'restore-deployment') {
               await replaceDeployment(entry.namespace!, entry.resourceName!, data);
             } else if (entry.actionName === 'restore-replicas') {
-              await scaleDeployment(entry.namespace!, entry.resourceName!, data.replicas);
+              await scaleDeployment(entry.namespace!, entry.resourceName!, Number(data.replicas));
             } else if (entry.actionName === 'restore-networkpolicy') {
               if (data) {
                 await replaceNetworkPolicy(entry.namespace!, entry.resourceName!, data);
@@ -461,7 +467,7 @@ export async function startSimulationWorker(): Promise<void> {
               data: { status: 'completed', completedAt: new Date() }
             });
           } catch (err: any) {
-            console.error(`[Worker] Failed to recover rollback entry ${entry.id}:`, err);
+            console.error(`[Simulator:${sim.id}] [Recovery] Failed to recover rollback entry ${entry.id}:`, err);
             await prisma.rollbackEntry.update({
               where: { id: entry.id },
               data: { status: 'failed', error: err.message }
@@ -476,38 +482,71 @@ export async function startSimulationWorker(): Promise<void> {
 
         await prisma.failureEvent.updateMany({
           where: { simulationId: sim.id, state: 'running' },
-          data: { state: 'failed', endedAt: new Date(), errorMessage: 'Recovered from crash; rollback executed.' }
+          data: { state: 'failed', endedAt: new Date(), errorMessage: 'Recovered from worker restart; rollback executed.' }
+        });
+
+        await prisma.report.create({
+          data: {
+            simulationId: sim.id,
+            summary: 'Recovered from worker restart',
+            result: 'failed',
+            failureType: sim.failureType,
+            method: 'unknown', // Best effort
+            namespace: sim.namespace,
+            durationSeconds: sim.durationSeconds,
+            startedAt: sim.startedAt ?? new Date(),
+            endedAt: new Date(),
+            errors: 'Simulation orphaned after worker crash/restart; state restored.'
+          } as any
         });
       }
     }
   } catch (e) {
-    console.warn('[Worker] Failed to cleanup orphaned simulations', e);
+    console.warn('[Simulator:Worker] [Worker] Failed to cleanup orphaned simulations', e);
   }
 
-  // Periodically check for stuck 'pending' simulations
+  // Periodically check for queued/pending simulations and stale runs
   const poll = async () => {
-    console.log('[Worker] Polling simulations');
+    console.log('[Simulator:Worker] [Worker] Checking simulations...');
     try {
       const prisma = getPrismaClient();
-      const pendingSims = await prisma.simulation.findMany({
-        where: { state: 'pending' },
+
+      // 1. Check for stale RUNNING simulations (> 10 mins)
+      const staleThreshold = new Date(Date.now() - 10 * 60 * 1000);
+      const staleSims = await prisma.simulation.findMany({
+        where: { state: 'running', startedAt: { lte: staleThreshold } },
+      });
+
+      for (const s of staleSims) {
+        console.log(`[Simulator:${s.id}] [Timeout] Triggering force-failure due to 10m timeout.`);
+        // Force failure logic
+        void stopSimulation(s.id, { id: 'system', email: 'system@simulator.local', role: 'admin' }).catch(err => {
+          console.error(`[Simulator:${s.id}] [Timeout] Failed to auto-stop stale simulation:`, err);
+        });
+      }
+
+      // 2. Fetch QUEUED first (priority), then PENDING
+      const candidates = await prisma.simulation.findMany({
+        where: { state: { in: ['queued', 'pending'] } as any },
+        orderBy: [
+          { state: 'desc' }, // 'queued' (q) comes before 'pending' (p) in desc order? No, q > p. Yes.
+          { createdAt: 'asc' }
+        ],
         take: 10,
       });
 
-      if (pendingSims.length > 0) {
-        console.log(`[Worker] Found ${pendingSims.length} pending simulations to process.`);
+      if (candidates.length > 0) {
+        console.log(`[Simulator:Worker] [Worker] Found ${candidates.length} candidate simulations (queued/pending).`);
       }
 
-      for (const sim of pendingSims) {
-        console.log(`[Worker] Triggering runSimulation for ${sim.id}`);
-        // Fire runSimulation for each found pending simulation.
-        // runSimulation has internal checks (state === 'running') to prevent race conditions.
+      for (const sim of candidates) {
+        console.log(`[Simulator:${sim.id}] [Worker] Picking up simulation (state: ${sim.state})`);
         void runSimulation(sim.id).catch((e) => {
-          console.error(`[Worker] Failed to execute simulation ${sim.id}:`, e);
+          console.error(`[Simulator:${sim.id}] [Worker] Execution failed:`, e);
         });
       }
     } catch (e) {
-      console.error('[Worker] Simulation worker poll failed', e);
+      console.error('[Simulator:Worker] [Worker] Poll failed', e);
     }
   };
 

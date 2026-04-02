@@ -179,25 +179,28 @@ export async function replaceDeployment(
   }
 }
 
+export async function listPodsBySelector(
+  namespace: string,
+  labelSelector: string
+): Promise<any[]> {
+  const { core } = getKubeClients();
+  const coreApi = core as any;
+  const res = await withTimeout(coreApi.listNamespacedPod({
+    namespace: namespace || 'default',
+    labelSelector,
+  })) as any;
+  return res?.body?.items || res?.items || [];
+}
+
 export async function deletePodsBySelector(
   namespace: string,
   labelSelector: string,
   ref?: StepRef
 ): Promise<number> {
-  const { core } = getKubeClients();
   const start = Date.now();
   try {
-    console.log(`[K8s Ops] Listing pods for namespace: ${namespace || 'default'}, selector: ${labelSelector}`);
-    const coreApi = core as any;
-    console.log(`[K8s Ops] Listing pods for namespace: ${namespace || 'default'}, selector: ${labelSelector}`);
-    
-    const res = await withTimeout(coreApi.listNamespacedPod({
-      namespace: namespace || 'default',
-      labelSelector,
-    })) as any;
-
-    console.log(`[K8s Ops] Found pods for selector ${labelSelector}`);
-    const items = res?.body?.items || res?.items || [];
+    const items = await listPodsBySelector(namespace, labelSelector);
+    const { core } = getKubeClients();
 
     for (const pod of items) {
       if (!pod?.metadata?.name) continue;
@@ -533,4 +536,73 @@ export async function deleteNetworkPolicy(
       });
     }
   }
+}
+
+export async function execCommandInPod(
+  namespace: string,
+  podName: string,
+  containerName: string,
+  command: string[],
+  ref?: StepRef
+): Promise<{ stdout: string; stderr: string; code: number }> {
+    const { exec } = getKubeClients();
+    const start = Date.now();
+
+    return new Promise((resolve, reject) => {
+        let stdoutData = '';
+        let stderrData = '';
+
+        console.log(`[Simulator:${ref?.simulationId ?? 'unknown'}] [K8s Ops] Executing command in pod ${podName}: ${command.join(' ')}`);
+
+        // Use PassThrough streams for stdin, stdout, and stderr
+        const stream = new (require('stream').PassThrough)();
+        const errStream = new (require('stream').PassThrough)();
+
+        stream.on('data', (chunk: Buffer) => {
+          stdoutData += chunk.toString();
+        });
+        errStream.on('data', (chunk: Buffer) => {
+          stderrData += chunk.toString();
+        });
+
+        const execPromise = exec.exec(
+            namespace || 'default',
+            podName,
+            containerName,
+            command,
+            stream,
+            errStream,
+            null, // stdin
+            false, // tty
+            (status: any) => {
+                const code = status?.status === 'Success' ? 0 : (status?.code ?? 1);
+                const duration = Date.now() - start;
+
+                console.log(`[Simulator:${ref?.simulationId ?? 'unknown'}] [K8s Ops] Exec command finished with code ${code}. Output length: ${stdoutData.length}, Error length: ${stderrData.length}`);
+
+                if (ref) {
+                    void recordSimulationStep({
+                        simulationId: ref.simulationId,
+                        name: ref.name,
+                        failureType: ref.failureType,
+                        stepType: 'execution',
+                        status: code === 0 ? 'success' : 'failed',
+                        command: `kubectl exec -n ${namespace} ${podName} -c ${containerName} -- ${command.join(' ')}`,
+                        message: code === 0 ? `Executed command successfully: ${stdoutData.slice(0, 50)}...` : `Command failed: ${stderrData.slice(0, 100)}`,
+                        resourceType: 'Pod',
+                        resourceName: podName,
+                        namespace: namespace || 'default',
+                        durationMs: duration,
+                    });
+                }
+
+                resolve({ stdout: stdoutData, stderr: stderrData, code });
+            }
+        );
+
+        execPromise.catch((err) => {
+          console.error(`[Simulator:${ref?.simulationId ?? 'unknown'}] [K8s Ops] Exec exception in pod ${podName}:`, err);
+          reject(err);
+        });
+    });
 }

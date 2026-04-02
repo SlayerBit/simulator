@@ -46,7 +46,7 @@ export function loadConfig(): AppConfig {
     .map((v) => v.trim())
     .filter(Boolean);
   const globalKillSwitch = (process.env.SIM_GLOBAL_KILL_SWITCH || 'false').toLowerCase() === 'true';
-  const maxConcurrentSimulations = parseNumberEnv('SIM_MAX_CONCURRENT', 3);
+  const maxConcurrentSimulations = parseNumberEnv('SIM_MAX_CONCURRENT', 4);
   const maxDurationSeconds = parseNumberEnv('SIM_MAX_DURATION_SECONDS', 900);
   const maxIntensityPercent = parseNumberEnv('SIM_MAX_INTENSITY_PERCENT', 90);
   const maxLatencyMs = parseNumberEnv('SIM_MAX_LATENCY_MS', 2000);

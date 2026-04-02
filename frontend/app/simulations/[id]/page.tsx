@@ -105,6 +105,9 @@ export default function SimulationDetailPage() {
               <div className="flex items-center gap-2">
                 <h2 className="text-sm font-semibold text-slate-200">Simulation Status</h2>
                 <Badge variant={stateVariant as any} className="text-[10px] uppercase font-bold py-0 h-4">{state}</Badge>
+                {sim?.manualRollback && (
+                  <Badge variant="neutral" className="text-[10px] uppercase font-bold py-0 h-4 border-amber-500/30 text-amber-400 bg-amber-400/5">Manual Recovery</Badge>
+                )}
               </div>
               <p className="text-[11px] text-slate-500 mt-0.5">Created {new Date(sim?.createdAt).toLocaleString()}</p>
             </div>
@@ -114,11 +117,11 @@ export default function SimulationDetailPage() {
               <ArrowLeft className="h-3.5 w-3.5" /> Dashboard
             </Button>
             
-            {sim?.manualRollback && sim?.isRollbackable && (
+            {sim?.manualRollback && sim?.isRollbackable && state === 'running' && (
               <Button 
                 variant="default" 
                 size="sm" 
-                disabled={rollingBack || state !== 'running'} 
+                disabled={rollingBack} 
                 onClick={async () => {
                   if (!token) return;
                   setRollingBack(true);
@@ -134,7 +137,7 @@ export default function SimulationDetailPage() {
                 className="gap-1.5 bg-amber-600 hover:bg-amber-500 border-0 text-white"
               >
                 <RotateCcw className={cn("h-3.5 w-3.5", rollingBack && "animate-spin")} /> 
-                {rollingBack ? 'Rolling back...' : 'Rollback'}
+                {rollingBack ? 'Rolling back...' : 'Manual Rollback'}
               </Button>
             )}
 
