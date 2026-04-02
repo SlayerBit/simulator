@@ -35,6 +35,7 @@ export default function SimulationDetailPage() {
   const [cancelOpen, setCancelOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<TabId>('overview');
   const [rollingBack, setRollingBack] = useState(false);
+  const [stopping, setStopping] = useState(false);
 
   useEffect(() => {
     if (!loading && !token) router.push('/login');
@@ -117,7 +118,7 @@ export default function SimulationDetailPage() {
               <ArrowLeft className="h-3.5 w-3.5" /> Dashboard
             </Button>
             
-            {sim?.manualRollback && sim?.isRollbackable && state === 'running' && (
+            {sim?.isRollbackable && (
               <Button 
                 variant="default" 
                 size="sm" 
@@ -143,8 +144,8 @@ export default function SimulationDetailPage() {
 
             <Dialog open={cancelOpen} onOpenChange={(v: boolean) => setCancelOpen(v)}>
               <DialogTrigger asChild>
-                <Button variant="destructive" size="sm" disabled={!canStop || ['completed', 'failed', 'cancelled', 'rolled_back'].includes(state)} className="gap-1.5">
-                  <Square className="h-3.5 w-3.5" /> Stop Run
+                <Button variant="destructive" size="sm" disabled={!canStop || stopping || ['completed', 'failed', 'cancelled', 'rolled_back'].includes(state)} className="gap-1.5 border-red-500/30 hover:bg-red-500/20 bg-transparent text-red-400">
+                  <Square className={cn("h-3.5 w-3.5", stopping && "animate-pulse")} /> {stopping ? 'Stopping...' : 'Stop Run'}
                 </Button>
               </DialogTrigger>
               <DialogContent className="bg-slate-950 border-slate-800">
@@ -158,13 +159,28 @@ export default function SimulationDetailPage() {
                     <Button
                       variant="destructive"
                       type="button"
+                      disabled={stopping}
                       onClick={async () => {
                         if (!token) return;
-                        await api.stopSimulation(token, id);
-                        setCancelOpen(false);
+                        setStopping(true);
+                        try {
+                          await api.stopSimulation(token, id);
+                          // Optimistic update
+                          setData((prev: any) => ({
+                            ...prev,
+                            simulation: { ...prev.simulation, state: 'cancelled' }
+                          }));
+                          setCancelOpen(false);
+                        } catch (e: any) {
+                          setErr(e.message ?? 'Failed to stop');
+                        } finally {
+                          setStopping(false);
+                        }
                       }}
+                      className="gap-2"
                     >
-                      Confirm Stop
+                      {stopping ? <RotateCcw className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
+                      {stopping ? 'Stopping...' : 'Confirm Stop'}
                     </Button>
                   </DialogFooter>
                 </form>

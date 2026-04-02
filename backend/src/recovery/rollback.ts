@@ -1,6 +1,6 @@
 export interface RollbackAction {
   name: string;
-  run: () => Promise<void>;
+  run: (signal?: AbortSignal) => Promise<void>;
 }
 
 export class RollbackStack {
@@ -14,10 +14,14 @@ export class RollbackStack {
     return this.actions.length;
   }
 
-  async rollbackAll(): Promise<{ ok: boolean; errors: string[] }> {
+  async rollbackAll(signal?: AbortSignal): Promise<{ ok: boolean; errors: string[] }> {
     const errors: string[] = [];
     // Process in reverse order (LIFO)
     for (let i = this.actions.length - 1; i >= 0; i--) {
+      if (signal?.aborted) {
+        errors.push(`Rollback aborted by signal at step ${i}`);
+        break;
+      }
       const action = this.actions[i];
       if (!action) continue;
 
@@ -27,15 +31,27 @@ export class RollbackStack {
 
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-          await action.run();
+          await action.run(signal);
           success = true;
           break;
         } catch (e: any) {
           lastError = e;
+          if (e?.name === 'AbortError') {
+            success = false;
+            break;
+          }
           if (attempt < maxRetries) {
             const delay = Math.pow(2, attempt) * 1000;
             console.warn(`[Rollback] Action "${action.name}" failed (attempt ${attempt}/${maxRetries}). Retrying in ${delay}ms...`, e?.message ?? e);
-            await new Promise(resolve => setTimeout(resolve, delay));
+            
+            // Wait with abort support
+            await new Promise((resolve, reject) => {
+              const t = setTimeout(resolve, delay);
+              signal?.addEventListener('abort', () => {
+                clearTimeout(t);
+                reject(new Error('AbortError'));
+              }, { once: true });
+            });
           }
         }
       }
@@ -43,6 +59,7 @@ export class RollbackStack {
       if (!success) {
         errors.push(`${action.name}: ${lastError?.message ?? String(lastError)} (failed after ${maxRetries} attempts)`);
         console.error(`[Rollback] Action "${action.name}" failed permanently after ${maxRetries} attempts.`);
+        if (lastError?.name === 'AbortError') break;
       }
     }
     return { ok: errors.length === 0, errors };

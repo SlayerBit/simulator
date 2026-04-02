@@ -29,10 +29,10 @@ function snapKey(simulationId: string, kind: Snapshot['kind'], name: string): st
   return `${simulationId}:${kind}:${name}`;
 }
 
-async function snapshotDeployment(simulationId: string, namespace: string, deploymentName: string): Promise<void> {
+async function snapshotDeployment(simulationId: string, namespace: string, deploymentName: string, signal?: AbortSignal): Promise<void> {
   const key = snapKey(simulationId, 'deployment', deploymentName);
   if (snapshots.has(key)) return;
-  const current = await readDeployment(namespace, deploymentName);
+  const current = await readDeployment(namespace, deploymentName, signal);
   snapshots.set(key, { kind: 'deployment', namespace, deploymentName, body: current });
 
   // Persistence (C-05)
@@ -48,11 +48,11 @@ async function snapshotDeployment(simulationId: string, namespace: string, deplo
   });
 }
 
-async function restoreDeployment(simulationId: string, namespace: string, deploymentName: string, ref?: StepRef): Promise<void> {
+async function restoreDeployment(simulationId: string, namespace: string, deploymentName: string, ref?: StepRef, signal?: AbortSignal): Promise<void> {
   const key = snapKey(simulationId, 'deployment', deploymentName);
   const snap = snapshots.get(key);
   if (!snap || snap.kind !== 'deployment') return;
-  await replaceDeployment(namespace, deploymentName, snap.body, ref);
+  await replaceDeployment(namespace, deploymentName, snap.body, ref, signal);
   snapshots.delete(key);
 
   // Persistence (C-05)
@@ -62,10 +62,10 @@ async function restoreDeployment(simulationId: string, namespace: string, deploy
   });
 }
 
-async function snapshotReplicas(simulationId: string, namespace: string, deploymentName: string): Promise<void> {
+async function snapshotReplicas(simulationId: string, namespace: string, deploymentName: string, signal?: AbortSignal): Promise<void> {
   const key = snapKey(simulationId, 'replicas', deploymentName);
   if (snapshots.has(key)) return;
-  const current = await readDeployment(namespace, deploymentName);
+  const current = await readDeployment(namespace, deploymentName, signal);
   const replicas = current?.spec?.replicas ?? null;
   snapshots.set(key, { kind: 'replicas', namespace, deploymentName, replicas });
 
@@ -82,12 +82,12 @@ async function snapshotReplicas(simulationId: string, namespace: string, deploym
   });
 }
 
-async function restoreReplicas(simulationId: string, namespace: string, deploymentName: string, ref?: StepRef): Promise<void> {
+async function restoreReplicas(simulationId: string, namespace: string, deploymentName: string, ref?: StepRef, signal?: AbortSignal): Promise<void> {
   const key = snapKey(simulationId, 'replicas', deploymentName);
   const snap = snapshots.get(key);
   if (!snap || snap.kind !== 'replicas') return;
   if (typeof snap.replicas === 'number') {
-    await scaleDeployment(namespace, deploymentName, snap.replicas, ref);
+    await scaleDeployment(namespace, deploymentName, snap.replicas, ref, signal);
   }
   snapshots.delete(key);
 
@@ -98,10 +98,10 @@ async function restoreReplicas(simulationId: string, namespace: string, deployme
   });
 }
 
-async function snapshotNetworkPolicy(simulationId: string, namespace: string, policyName: string): Promise<void> {
+async function snapshotNetworkPolicy(simulationId: string, namespace: string, policyName: string, signal?: AbortSignal): Promise<void> {
   const key = snapKey(simulationId, 'networkpolicy', policyName);
   if (snapshots.has(key)) return;
-  const existing = await readNetworkPolicy(namespace, policyName);
+  const existing = await readNetworkPolicy(namespace, policyName); // No timeout for readNP? Actually readNP doesn't use withTimeout yet.
   snapshots.set(key, { kind: 'networkpolicy', namespace, policyName, body: existing });
 
   // Persistence (C-05)
@@ -117,14 +117,14 @@ async function snapshotNetworkPolicy(simulationId: string, namespace: string, po
   });
 }
 
-async function restoreNetworkPolicy(simulationId: string, namespace: string, policyName: string, ref?: StepRef): Promise<void> {
+async function restoreNetworkPolicy(simulationId: string, namespace: string, policyName: string, ref?: StepRef, signal?: AbortSignal): Promise<void> {
   const key = snapKey(simulationId, 'networkpolicy', policyName);
   const snap = snapshots.get(key);
   if (!snap || snap.kind !== 'networkpolicy') return;
   if (snap.body) {
-    await replaceNetworkPolicy(namespace, policyName, snap.body, ref);
+    await replaceNetworkPolicy(namespace, policyName, snap.body, ref, signal);
   } else {
-    await deleteNetworkPolicy(namespace, policyName, ref);
+    await deleteNetworkPolicy(namespace, policyName, ref, signal);
   }
   snapshots.delete(key);
 
@@ -208,7 +208,7 @@ const podCrashDeletePods: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Delete Pods', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would delete pods by selector');
     console.log(`[Failure-Method] Executing delete-pods in namespace ${p.target.namespace} for selector ${p.target.labelSelector}`);
-    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
+    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref, p.signal);
     return ok(`Deleted ${count} pods`);
   },
   rollback: async () => { },
@@ -235,13 +235,13 @@ const podCrashScaleToZero: FailureMethod = {
     if (p.dryRun) return ok('Dry-run: would scale deployment to 0');
     const dep = requireDeployment(p);
     console.log(`[Failure-Method] Executing scale-to-zero for deployment ${dep} in namespace ${p.target.namespace}`);
-    await snapshotReplicas(p.simulationId, p.target.namespace, dep);
-    await scaleDeployment(p.target.namespace, dep, 0, ref);
+    await snapshotReplicas(p.simulationId, p.target.namespace, dep, p.signal);
+    await scaleDeployment(p.target.namespace, dep, 0, ref, p.signal);
     return ok('Scaled to 0');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Replicas', failureType: p.failureType };
-    await restoreReplicas(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreReplicas(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -265,7 +265,7 @@ const podCrashCrashLoopEnv: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Inject Env', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch deployment env CRASH_LOOP=1');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: {
@@ -277,12 +277,12 @@ const podCrashCrashLoopEnv: FailureMethod = {
           },
         },
       },
-    }, ref);
+    }, ref, p.signal);
     return ok('Patched CRASH_LOOP=1');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -306,7 +306,7 @@ const podCrashInvalidCommand: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Invalid Command', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch command to invalid');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: {
@@ -318,12 +318,12 @@ const podCrashInvalidCommand: FailureMethod = {
           },
         },
       },
-    }, ref);
+    }, ref, p.signal);
     return ok('Patched command to exit 137');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -354,7 +354,7 @@ const svcUnavailableScaleZero: FailureMethod = {
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Replicas', failureType: p.failureType };
-    await restoreReplicas(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreReplicas(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -379,7 +379,7 @@ const svcUnavailableNetpolDenyIngress: FailureMethod = {
     const name = npName(p.simulationId, 'deny-ing');
     const ref = { simulationId: p.simulationId, name: 'Deny Ingress', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would apply deny-ingress NetworkPolicy');
-    await snapshotNetworkPolicy(p.simulationId, p.target.namespace, name);
+    await snapshotNetworkPolicy(p.simulationId, p.target.namespace, name, p.signal);
     await upsertNetworkPolicy(p.target.namespace, name, {
       apiVersion: 'networking.k8s.io/v1',
       kind: 'NetworkPolicy',
@@ -389,12 +389,12 @@ const svcUnavailableNetpolDenyIngress: FailureMethod = {
         policyTypes: ['Ingress'],
         ingress: [],
       },
-    }, ref);
+    }, ref, p.signal);
     return ok('Applied deny-ingress NetworkPolicy');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore NetPol', failureType: p.failureType };
-    await restoreNetworkPolicy(p.simulationId, p.target.namespace, npName(p.simulationId, 'deny-ing'), ref);
+    await restoreNetworkPolicy(p.simulationId, p.target.namespace, npName(p.simulationId, 'deny-ing'), ref, p.signal);
   },
 };
 
@@ -419,7 +419,7 @@ const svcUnavailableNetpolDenyEgress: FailureMethod = {
     const name = npName(p.simulationId, 'deny-eg');
     const ref = { simulationId: p.simulationId, name: 'Deny Egress', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would apply deny-egress NetworkPolicy');
-    await snapshotNetworkPolicy(p.simulationId, p.target.namespace, name);
+    await snapshotNetworkPolicy(p.simulationId, p.target.namespace, name, p.signal);
     await upsertNetworkPolicy(p.target.namespace, name, {
       apiVersion: 'networking.k8s.io/v1',
       kind: 'NetworkPolicy',
@@ -429,12 +429,12 @@ const svcUnavailableNetpolDenyEgress: FailureMethod = {
         policyTypes: ['Egress'],
         egress: [],
       },
-    }, ref);
+    }, ref, p.signal);
     return ok('Applied deny-egress NetworkPolicy');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore NetPol', failureType: p.failureType };
-    await restoreNetworkPolicy(p.simulationId, p.target.namespace, npName(p.simulationId, 'deny-eg'), ref);
+    await restoreNetworkPolicy(p.simulationId, p.target.namespace, npName(p.simulationId, 'deny-eg'), ref, p.signal);
   },
 };
 
@@ -457,7 +457,7 @@ const svcUnavailableRestartPods: FailureMethod = {
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restart Pods', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would restart pods');
-    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
+    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref, p.signal);
     return ok(`Restarted ${count} pods`);
   },
   rollback: async () => { },
@@ -484,18 +484,18 @@ const dbFailPatchEnvBadUrl: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Inject Bad DB URL', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch DATABASE_URL');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: {
         spec: { template: { spec: { containers: [{ env: [{ name: 'DATABASE_URL', value: 'postgresql://invalid' }] }] } } },
       },
-    }, ref);
+    }, ref, p.signal);
     return ok('Patched DATABASE_URL to invalid');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -520,7 +520,7 @@ const dbFailNetpolDenyEgressAll: FailureMethod = {
     const name = npName(p.simulationId, 'db-eg');
     const ref = { simulationId: p.simulationId, name: 'Block DB Egress', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would apply egress deny policy');
-    await snapshotNetworkPolicy(p.simulationId, p.target.namespace, name);
+    await snapshotNetworkPolicy(p.simulationId, p.target.namespace, name, p.signal);
     await upsertNetworkPolicy(p.target.namespace, name, {
       apiVersion: 'networking.k8s.io/v1',
       kind: 'NetworkPolicy',
@@ -530,12 +530,12 @@ const dbFailNetpolDenyEgressAll: FailureMethod = {
         policyTypes: ['Egress'],
         egress: [],
       },
-    }, ref);
+    }, ref, p.signal);
     return ok('Applied egress deny NetworkPolicy');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore NetPol', failureType: p.failureType };
-    await restoreNetworkPolicy(p.simulationId, p.target.namespace, npName(p.simulationId, 'db-eg'), ref);
+    await restoreNetworkPolicy(p.simulationId, p.target.namespace, npName(p.simulationId, 'db-eg'), ref, p.signal);
   },
 };
 
@@ -559,16 +559,16 @@ const dbFailHostAliasPoison: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Poison DNS', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch hostAliases for DB_HOST');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/merge-patch+json',
       body: { spec: { template: { spec: { hostAliases: [{ ip: '203.0.113.99', hostnames: ['DB_HOST'] }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Injected hostAliases for DB_HOST');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -591,7 +591,7 @@ const dbFailRestartPods: FailureMethod = {
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restart Pods', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would restart pods');
-    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
+    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref, p.signal);
     return ok(`Restarted ${count} pods`);
   },
   rollback: async () => { },
@@ -617,7 +617,7 @@ const cacheKillPods: FailureMethod = {
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Kill Cache Pods', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would delete cache pods');
-    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
+    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref, p.signal);
     return ok(`Deleted ${count} cache pods`);
   },
   rollback: async () => { },
@@ -644,7 +644,7 @@ const cacheBlockTraffic: FailureMethod = {
     const name = npName(p.simulationId, 'cache-eg');
     const ref = { simulationId: p.simulationId, name: 'Block Cache Egress', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would apply deny egress');
-    await snapshotNetworkPolicy(p.simulationId, p.target.namespace, name);
+    await snapshotNetworkPolicy(p.simulationId, p.target.namespace, name, p.signal);
     await upsertNetworkPolicy(p.target.namespace, name, {
       apiVersion: 'networking.k8s.io/v1',
       kind: 'NetworkPolicy',
@@ -654,12 +654,12 @@ const cacheBlockTraffic: FailureMethod = {
         policyTypes: ['Egress'],
         egress: [],
       },
-    }, ref);
+    }, ref, p.signal);
     return ok('Applied deny-egress policy');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore NetPol', failureType: p.failureType };
-    await restoreNetworkPolicy(p.simulationId, p.target.namespace, npName(p.simulationId, 'cache-eg'), ref);
+    await restoreNetworkPolicy(p.simulationId, p.target.namespace, npName(p.simulationId, 'cache-eg'), ref, p.signal);
   },
 };
 
@@ -683,18 +683,18 @@ const cacheInjectLatencyEnv: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Inject Cache Latency', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch CACHE_LATENCY_MS');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: {
         spec: { template: { spec: { containers: [{ env: [{ name: 'CACHE_LATENCY_MS', value: String(p.latencyMs ?? 500) }] }] } } },
       },
-    }, ref);
+    }, ref, p.signal);
     return ok('Patched CACHE_LATENCY_MS');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -718,16 +718,16 @@ const cacheInjectBadEnv: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Inject Bad Cache URL', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch CACHE_URL invalid');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: { spec: { template: { spec: { containers: [{ env: [{ name: 'CACHE_URL', value: 'redis://invalid:6379' }] }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Patched CACHE_URL invalid');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -757,16 +757,16 @@ const netLatencyEnv: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Inject HTTP Latency', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch HTTP_LATENCY_MS');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     
     // Hard Chaos Attempt: tc netem (Requires CAP_NET_ADMIN)
     try {
-        const pods = await listPodsBySelector(p.target.namespace, p.target.labelSelector || `app=${dep}`);
+        const pods = await listPodsBySelector(p.target.namespace, p.target.labelSelector || `app=${dep}`, p.signal);
         for (const pod of pods) {
             if (pod.metadata?.name) {
                 console.log(`[Simulator:${p.simulationId}] [Chaos] Attempting tc injection on pod ${pod.metadata.name}`);
                 const res = await execCommandInPod(p.target.namespace, pod.metadata.name, dep, 
-                    ['sh', '-c', `tc qdisc add dev eth0 root netem delay ${p.latencyMs}ms`], ref);
+                    ['sh', '-c', `tc qdisc add dev eth0 root netem delay ${p.latencyMs}ms`], ref, p.signal);
                 if (res.code !== 0) {
                     console.warn(`[Simulator:${p.simulationId}] [Chaos] tc injection failed (likely missing CAP_NET_ADMIN): ${res.stderr}`);
                 }
@@ -779,7 +779,7 @@ const netLatencyEnv: FailureMethod = {
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: { spec: { template: { spec: { containers: [{ name: dep, env: [{ name: 'HTTP_LATENCY_MS', value: String(p.latencyMs) }] }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Injected HTTP_LATENCY_MS (Soft Chaos) and attempted tc (Hard Chaos)');
   },
   rollback: async (p) => {
@@ -788,16 +788,16 @@ const netLatencyEnv: FailureMethod = {
 
     // Rollback Hard Chaos: tc qdisc del
     try {
-        const pods = await listPodsBySelector(p.target.namespace, p.target.labelSelector || `app=${dep}`);
+        const pods = await listPodsBySelector(p.target.namespace, p.target.labelSelector || `app=${dep}`, p.signal);
         for (const pod of pods) {
             if (pod.metadata?.name) {
                 await execCommandInPod(p.target.namespace, pod.metadata.name, dep, 
-                    ['sh', '-c', 'tc qdisc del dev eth0 root'], ref);
+                    ['sh', '-c', 'tc qdisc del dev eth0 root'], ref, p.signal);
             }
         }
     } catch (err) { /* ignore rollback errors if pod already gone */ }
 
-    await restoreDeployment(p.simulationId, p.target.namespace, dep, ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, dep, ref, p.signal);
   },
 };
 
@@ -820,7 +820,7 @@ const netLatencyRestartPods: FailureMethod = {
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restart Pods', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would restart pods');
-    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
+    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref, p.signal);
     return ok(`Restarted ${count} pods`);
   },
   rollback: async () => { },
@@ -847,7 +847,7 @@ const netLatencyDenyEgressBrief: FailureMethod = {
     const name = npName(p.simulationId, 'lat-eg');
     const ref = { simulationId: p.simulationId, name: 'Deny Egress', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would deny egress');
-    await snapshotNetworkPolicy(p.simulationId, p.target.namespace, name);
+    await snapshotNetworkPolicy(p.simulationId, p.target.namespace, name, p.signal);
     await upsertNetworkPolicy(p.target.namespace, name, {
       apiVersion: 'networking.k8s.io/v1',
       kind: 'NetworkPolicy',
@@ -857,12 +857,12 @@ const netLatencyDenyEgressBrief: FailureMethod = {
         policyTypes: ['Egress'],
         egress: [],
       },
-    }, ref);
+    }, ref, p.signal);
     return ok('Applied deny-egress');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore NetPol', failureType: p.failureType };
-    await restoreNetworkPolicy(p.simulationId, p.target.namespace, npName(p.simulationId, 'lat-eg'), ref);
+    await restoreNetworkPolicy(p.simulationId, p.target.namespace, npName(p.simulationId, 'lat-eg'), ref, p.signal);
   },
 };
 
@@ -885,7 +885,7 @@ const netLatencyScaleDown: FailureMethod = {
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Scale Down', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would scale down to 1');
-    await scaleDeployment(p.target.namespace, requireDeployment(p), 1, ref);
+    await scaleDeployment(p.target.namespace, requireDeployment(p), 1, ref, p.signal);
     return ok('Scaled to 1');
   },
   rollback: async () => { },
@@ -917,16 +917,16 @@ const pktLossEnv: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Inject Packet Loss', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch PACKET_LOSS_PERCENT');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
 
     // Hard Chaos Attempt: tc netem loss (Requires CAP_NET_ADMIN)
     try {
-        const pods = await listPodsBySelector(p.target.namespace, p.target.labelSelector || `app=${dep}`);
+        const pods = await listPodsBySelector(p.target.namespace, p.target.labelSelector || `app=${dep}`, p.signal);
         for (const pod of pods) {
             if (pod.metadata?.name) {
                 console.log(`[Simulator:${p.simulationId}] [Chaos] Attempting tc loss injection on pod ${pod.metadata.name}`);
                 const res = await execCommandInPod(p.target.namespace, pod.metadata.name, dep, 
-                    ['sh', '-c', `tc qdisc add dev eth0 root netem loss ${p.packetLossPercent}%`], ref);
+                    ['sh', '-c', `tc qdisc add dev eth0 root netem loss ${p.packetLossPercent}%`], ref, p.signal);
                 if (res.code !== 0) {
                     console.warn(`[Simulator:${p.simulationId}] [Chaos] tc injection failed: ${res.stderr}`);
                 }
@@ -937,7 +937,7 @@ const pktLossEnv: FailureMethod = {
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: { spec: { template: { spec: { containers: [{ name: dep, env: [{ name: 'PACKET_LOSS_PERCENT', value: String(p.packetLossPercent) }] }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Injected PACKET_LOSS_PERCENT (Soft Chaos) and attempted tc (Hard Chaos)');
   },
   rollback: async (p) => {
@@ -946,16 +946,16 @@ const pktLossEnv: FailureMethod = {
 
     // Rollback Hard Chaos
     try {
-        const pods = await listPodsBySelector(p.target.namespace, p.target.labelSelector || `app=${dep}`);
+        const pods = await listPodsBySelector(p.target.namespace, p.target.labelSelector || `app=${dep}`, p.signal);
         for (const pod of pods) {
             if (pod.metadata?.name) {
                 await execCommandInPod(p.target.namespace, pod.metadata.name, dep, 
-                    ['sh', '-c', 'tc qdisc del dev eth0 root'], ref);
+                    ['sh', '-c', 'tc qdisc del dev eth0 root'], ref, p.signal);
             }
         }
     } catch (err) { /* ignore */ }
 
-    await restoreDeployment(p.simulationId, p.target.namespace, dep, ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, dep, ref, p.signal);
   },
 };
 
@@ -980,7 +980,7 @@ const pktLossDenyEgress: FailureMethod = {
     const name = npName(p.simulationId, 'loss-eg');
     const ref = { simulationId: p.simulationId, name: 'Deny Egress', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would deny egress');
-    await snapshotNetworkPolicy(p.simulationId, p.target.namespace, name);
+    await snapshotNetworkPolicy(p.simulationId, p.target.namespace, name, p.signal);
     await upsertNetworkPolicy(p.target.namespace, name, {
       apiVersion: 'networking.k8s.io/v1',
       kind: 'NetworkPolicy',
@@ -990,12 +990,12 @@ const pktLossDenyEgress: FailureMethod = {
         policyTypes: ['Egress'],
         egress: [],
       },
-    }, ref);
+    }, ref, p.signal);
     return ok('Applied deny-egress');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore NetPol', failureType: p.failureType };
-    await restoreNetworkPolicy(p.simulationId, p.target.namespace, npName(p.simulationId, 'loss-eg'), ref);
+    await restoreNetworkPolicy(p.simulationId, p.target.namespace, npName(p.simulationId, 'loss-eg'), ref, p.signal);
   },
 };
 
@@ -1018,7 +1018,7 @@ const pktLossRestartPods: FailureMethod = {
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restart Pods', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would restart pods');
-    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
+    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref, p.signal);
     return ok(`Restarted ${count} pods`);
   },
   rollback: async () => { },
@@ -1075,7 +1075,7 @@ const cpuEnvLoop: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Inject CPU Hog', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch CPU_HOG');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
 
     // Hard Chaos: Patch CPU limits based on intensity
     // map intensity 0-100 to cpu limits. e.g. 80% intensity -> limit 20% of current or fixed low.
@@ -1105,12 +1105,12 @@ const cpuEnvLoop: FailureMethod = {
           },
         },
       },
-    }, ref);
+    }, ref, p.signal);
     return ok('Injected CPU_HOG');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1133,7 +1133,7 @@ const cpuRestartPods: FailureMethod = {
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restart Pods', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would restart pods');
-    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
+    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref, p.signal);
     return ok(`Restarted ${count} pods`);
   },
   rollback: async () => { },
@@ -1158,7 +1158,7 @@ const cpuScaleDown: FailureMethod = {
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Scale Down', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would scale down');
-    await scaleDeployment(p.target.namespace, requireDeployment(p), 1, ref);
+    await scaleDeployment(p.target.namespace, requireDeployment(p), 1, ref, p.signal);
     return ok('Scaled down');
   },
   rollback: async () => { },
@@ -1193,7 +1193,7 @@ const cpuTightLoopCommand: FailureMethod = {
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1223,16 +1223,16 @@ const memEnvLeak: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Inject Mem Leak', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch MEMORY_LEAK');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: { spec: { template: { spec: { containers: [{ env: [{ name: 'MEMORY_LEAK', value: '1' }] }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Injected MEMORY_LEAK');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1256,16 +1256,16 @@ const memPatchLimitsDown: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Reduce Mem Limits', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch resources.limits.memory');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: { spec: { template: { spec: { containers: [{ resources: { limits: { memory: '64Mi' } } }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Reduced memory limit to 64Mi');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1288,7 +1288,7 @@ const memRestartPods: FailureMethod = {
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restart Pods', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would restart pods');
-    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
+    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref, p.signal);
     return ok(`Restarted ${count} pods`);
   },
   rollback: async () => { },
@@ -1314,7 +1314,7 @@ const memAllocateMemoryCommand: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Alloc Memory', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch memory allocation loop');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: {
@@ -1334,12 +1334,12 @@ const memAllocateMemoryCommand: FailureMethod = {
           },
         },
       },
-    }, ref);
+    }, ref, p.signal);
     return ok('Patched command to allocate memory');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1364,16 +1364,16 @@ const diskFillEnv: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Fill Disk', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch DISK_FILL_MB');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: { spec: { template: { spec: { containers: [{ env: [{ name: 'DISK_FILL_MB', value: '500' }] }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Injected DISK_FILL_MB');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1397,16 +1397,16 @@ const diskLogExplosionEnv: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Log Explosion', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch LOG_EXPLOSION');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: { spec: { template: { spec: { containers: [{ env: [{ name: 'LOG_EXPLOSION', value: '1' }] }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Injected LOG_EXPLOSION');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1430,18 +1430,18 @@ const diskReduceEphemeral: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Reduce Disk', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch ephemeral-storage requests');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: {
         spec: { template: { spec: { containers: [{ resources: { requests: { 'ephemeral-storage': '1Mi' } } }] } } },
       },
-    }, ref);
+    }, ref, p.signal);
     return ok('Reduced ephemeral-storage requests');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1464,7 +1464,7 @@ const diskRestartPods: FailureMethod = {
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restart Pods', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would restart pods');
-    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
+    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref, p.signal);
     return ok(`Restarted ${count} pods`);
   },
   rollback: async () => { },
@@ -1491,16 +1491,16 @@ const misconfigBadEnv: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Bad Env', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch MISCONFIG=1');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: { spec: { template: { spec: { containers: [{ env: [{ name: 'MISCONFIG', value: '1' }] }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Injected MISCONFIG=1');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1524,16 +1524,16 @@ const misconfigBadPort: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Bad Port', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch containerPort');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: { spec: { template: { spec: { containers: [{ ports: [{ containerPort: 6553 }] }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Patched containerPort');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1557,16 +1557,16 @@ const misconfigRemoveEnv: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Remove Env', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would remove env');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: { spec: { template: { spec: { containers: [{ env: [] }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Cleared env');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1589,7 +1589,7 @@ const misconfigRestartPods: FailureMethod = {
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restart Pods', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would restart pods');
-    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
+    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref, p.signal);
     return ok(`Restarted ${count} pods`);
   },
   rollback: async () => { },
@@ -1616,13 +1616,13 @@ const autoscalingScaleZero: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Scale to Zero', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would scale to 0');
     const dep = requireDeployment(p);
-    await snapshotReplicas(p.simulationId, p.target.namespace, dep);
-    await scaleDeployment(p.target.namespace, dep, 0, ref);
+    await snapshotReplicas(p.simulationId, p.target.namespace, dep, p.signal);
+    await scaleDeployment(p.target.namespace, dep, 0, ref, p.signal);
     return ok('Scaled to 0');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Replicas', failureType: p.failureType };
-    await restoreReplicas(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreReplicas(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1645,7 +1645,7 @@ const autoscalingScaleDown: FailureMethod = {
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Scale Down', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would scale to 1');
-    await scaleDeployment(p.target.namespace, requireDeployment(p), 1, ref);
+    await scaleDeployment(p.target.namespace, requireDeployment(p), 1, ref, p.signal);
     return ok('Scaled to 1');
   },
   rollback: async () => { },
@@ -1670,7 +1670,7 @@ const autoscalingRestartPods: FailureMethod = {
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restart Pods', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would restart pods');
-    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
+    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref, p.signal);
     return ok(`Restarted ${count} pods`);
   },
   rollback: async () => { },
@@ -1696,16 +1696,16 @@ const autoscalingBadEnv: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Disable Scaling', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch DISABLE_SCALING');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: { spec: { template: { spec: { containers: [{ env: [{ name: 'DISABLE_SCALING', value: '1' }] }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Injected DISABLE_SCALING');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1730,16 +1730,16 @@ const probesFailReadiness: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Fail Readiness', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch READINESS_FAIL');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: { spec: { template: { spec: { containers: [{ env: [{ name: 'READINESS_FAIL', value: '1' }] }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Injected READINESS_FAIL');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1763,16 +1763,16 @@ const probesFailLiveness: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Fail Liveness', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch LIVENESS_FAIL');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: { spec: { template: { spec: { containers: [{ env: [{ name: 'LIVENESS_FAIL', value: '1' }] }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Injected LIVENESS_FAIL');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1796,16 +1796,16 @@ const probesDelayEnv: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Delay Probes', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch PROBE_DELAY_MS');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: { spec: { template: { spec: { containers: [{ env: [{ name: 'PROBE_DELAY_MS', value: String(p.latencyMs ?? 1000) }] }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Injected PROBE_DELAY_MS');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1829,16 +1829,16 @@ const probesInvalidEndpointEnv: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Invalid Probe URL', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch PROBE_ENDPOINT_OVERRIDE');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: { spec: { template: { spec: { containers: [{ env: [{ name: 'PROBE_ENDPOINT_OVERRIDE', value: '/__invalid' }] }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Injected PROBE_ENDPOINT_OVERRIDE');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1863,16 +1863,16 @@ const ingressMisrouteEnv: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Misroute Env', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch INGRESS_MISROUTE');
     const dep = requireDeployment(p);
-    await snapshotDeployment(p.simulationId, p.target.namespace, dep);
+    await snapshotDeployment(p.simulationId, p.target.namespace, dep, p.signal);
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: { spec: { template: { spec: { containers: [{ env: [{ name: 'INGRESS_MISROUTE', value: '1' }] }] } } } },
-    }, ref);
+    }, ref, p.signal);
     return ok('Injected INGRESS_MISROUTE');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Deployment', failureType: p.failureType };
-    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreDeployment(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1896,13 +1896,13 @@ const ingressMisrouteScaleZero: FailureMethod = {
     const ref = { simulationId: p.simulationId, name: 'Scale to Zero', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would scale to 0');
     const dep = requireDeployment(p);
-    await snapshotReplicas(p.simulationId, p.target.namespace, dep);
-    await scaleDeployment(p.target.namespace, dep, 0, ref);
+    await snapshotReplicas(p.simulationId, p.target.namespace, dep, p.signal);
+    await scaleDeployment(p.target.namespace, dep, 0, ref, p.signal);
     return ok('Scaled to 0');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore Replicas', failureType: p.failureType };
-    await restoreReplicas(p.simulationId, p.target.namespace, requireDeployment(p), ref);
+    await restoreReplicas(p.simulationId, p.target.namespace, requireDeployment(p), ref, p.signal);
   },
 };
 
@@ -1927,7 +1927,7 @@ const ingressMisrouteDenyIngress: FailureMethod = {
     const name = npName(p.simulationId, 'ing-deny');
     const ref = { simulationId: p.simulationId, name: 'Deny Ingress', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would deny ingress to pods');
-    await snapshotNetworkPolicy(p.simulationId, p.target.namespace, name);
+    await snapshotNetworkPolicy(p.simulationId, p.target.namespace, name, p.signal);
     await upsertNetworkPolicy(p.target.namespace, name, {
       apiVersion: 'networking.k8s.io/v1',
       kind: 'NetworkPolicy',
@@ -1937,12 +1937,12 @@ const ingressMisrouteDenyIngress: FailureMethod = {
         policyTypes: ['Ingress'],
         ingress: [],
       },
-    }, ref);
+    }, ref, p.signal);
     return ok('Denied ingress');
   },
   rollback: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restore NetPol', failureType: p.failureType };
-    await restoreNetworkPolicy(p.simulationId, p.target.namespace, npName(p.simulationId, 'ing-deny'), ref);
+    await restoreNetworkPolicy(p.simulationId, p.target.namespace, npName(p.simulationId, 'ing-deny'), ref, p.signal);
   },
 };
 
@@ -1965,7 +1965,7 @@ const ingressMisrouteRestartPods: FailureMethod = {
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Restart Pods', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would restart pods');
-    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref);
+    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref, p.signal);
     return ok(`Restarted ${count} pods`);
   },
   rollback: async () => { },

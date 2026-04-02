@@ -140,13 +140,14 @@ export async function runSimulation(simulationId: string): Promise<void> {
     packetLossPercent: parsePacketLoss(sim.intensity),
     dryRun: sim.dryRun,
     simulationId: sim.id,
+    signal,
   };
 
   await failureMethod.validate(params);
 
   rollback.push({
     name: `rollback:${failureMethod.supports}:${failureMethod.id}`,
-    run: async () => failureMethod.rollback(params),
+    run: async (s) => failureMethod.rollback({ ...params, signal: s || signal }),
   });
 
   if (sim.dryRun) {
@@ -222,7 +223,7 @@ export async function runSimulation(simulationId: string): Promise<void> {
     await sleepOrAbort(sim.durationSeconds * 1000);
 
     const recoveryStart = Date.now();
-    const rb = await rollback.rollbackAll();
+    const rb = await rollback.rollbackAll(signal);
     const recoverySeconds = Math.max(0, Math.round((Date.now() - recoveryStart) / 1000));
 
     await prisma.failureEvent.updateMany({
@@ -255,7 +256,7 @@ export async function runSimulation(simulationId: string): Promise<void> {
   } catch (e: any) {
     const wasCancelled = e?.name === 'AbortError' || String(e?.message ?? '').toLowerCase().includes('cancel');
     const recoveryStart = Date.now();
-    const rb = await rollback.rollbackAll();
+    const rb = await rollback.rollbackAll(signal);
     const recoverySeconds = Math.max(0, Math.round((Date.now() - recoveryStart) / 1000));
     await prisma.failureEvent.updateMany({
       where: { simulationId },

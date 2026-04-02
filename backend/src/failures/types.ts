@@ -10,6 +10,7 @@ export interface FailureParams {
   packetLossPercent?: number | undefined;
   dryRun: boolean;
   simulationId: string;
+  signal?: AbortSignal;
 }
 
 export interface FailureResult {

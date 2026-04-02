@@ -10,12 +10,24 @@ export interface StepRef {
 
 const DEFAULT_TIMEOUT_MS = 30000;
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+async function withTimeout<T>(promise: Promise<T>, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<T> {
   let timeoutId: NodeJS.Timeout;
+  
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutId = setTimeout(() => {
       reject(new Error(`Operation timed out after ${timeoutMs}ms`));
     }, timeoutMs);
+
+    if (signal) {
+      if (signal.aborted) {
+        clearTimeout(timeoutId);
+        reject(new Error('AbortError'));
+      }
+      signal.addEventListener('abort', () => {
+        clearTimeout(timeoutId);
+        reject(new Error('AbortError'));
+      }, { once: true });
+    }
   });
 
   return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
@@ -45,7 +57,8 @@ export async function scaleDeployment(
   namespace: string,
   deploymentName: string,
   replicas: number,
-  ref?: StepRef
+  ref?: StepRef,
+  signal?: AbortSignal
 ): Promise<void> {
   const { apps } = getKubeClients();
   const start = Date.now();
@@ -72,7 +85,9 @@ export async function scaleDeployment(
             'Content-Type': 'application/json-patch+json'
           }
         }
-      )
+      ),
+      DEFAULT_TIMEOUT_MS,
+      signal
     );
 
     if (ref) {
@@ -114,7 +129,8 @@ export async function scaleDeployment(
 
 export async function readDeployment(
   namespace: string,
-  deploymentName: string
+  deploymentName: string,
+  signal?: AbortSignal
 ): Promise<any> {
   const { apps } = getKubeClients();
 
@@ -122,7 +138,7 @@ export async function readDeployment(
   const dep = await withTimeout((apps as any).readNamespacedDeployment({
     name: deploymentName,
     namespace: namespace || 'default',
-  })) as any;
+  }), DEFAULT_TIMEOUT_MS, signal) as any;
 
   return dep.body ?? dep;
 }
@@ -131,7 +147,8 @@ export async function replaceDeployment(
   namespace: string,
   deploymentName: string,
   body: any,
-  ref?: StepRef
+  ref?: StepRef,
+  signal?: AbortSignal
 ): Promise<void> {
   const { apps } = getKubeClients();
 
@@ -143,7 +160,7 @@ export async function replaceDeployment(
       name: deploymentName,
       namespace: namespace || 'default',
       body,
-    }));
+    }), DEFAULT_TIMEOUT_MS, signal);
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
@@ -181,25 +198,27 @@ export async function replaceDeployment(
 
 export async function listPodsBySelector(
   namespace: string,
-  labelSelector: string
+  labelSelector: string,
+  signal?: AbortSignal
 ): Promise<any[]> {
   const { core } = getKubeClients();
   const coreApi = core as any;
   const res = await withTimeout(coreApi.listNamespacedPod({
     namespace: namespace || 'default',
     labelSelector,
-  })) as any;
+  }), DEFAULT_TIMEOUT_MS, signal) as any;
   return res?.body?.items || res?.items || [];
 }
 
 export async function deletePodsBySelector(
   namespace: string,
   labelSelector: string,
-  ref?: StepRef
+  ref?: StepRef,
+  signal?: AbortSignal
 ): Promise<number> {
   const start = Date.now();
   try {
-    const items = await listPodsBySelector(namespace, labelSelector);
+    const items = await listPodsBySelector(namespace, labelSelector, signal);
     const { core } = getKubeClients();
 
     for (const pod of items) {
@@ -210,7 +229,7 @@ export async function deletePodsBySelector(
       await withTimeout(coreApi.deleteNamespacedPod({
         name: pod.metadata.name!,
         namespace: namespace || 'default',
-      }));
+      }), DEFAULT_TIMEOUT_MS, signal);
     }
 
     if (ref) {
@@ -253,7 +272,8 @@ export async function patchDeploymentTemplate(
   namespace: string,
   deploymentName: string,
   patch: PatchSpec,
-  ref?: StepRef
+  ref?: StepRef,
+  signal?: AbortSignal
 ): Promise<void> {
   const { apps } = getKubeClients();
   const start = Date.now();
@@ -272,7 +292,7 @@ export async function patchDeploymentTemplate(
           'Content-Type': patch.contentType
         }
       } as any
-    ));
+    ), DEFAULT_TIMEOUT_MS, signal);
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
@@ -310,16 +330,17 @@ export async function patchDeploymentTemplate(
 
 export async function readNetworkPolicy(
   namespace: string,
-  policyName: string
+  policyName: string,
+  signal?: AbortSignal
 ): Promise<any | null> {
   const { net } = getKubeClients();
 
   try {
     const netApi = net as NetworkingV1Api;
-    const res = await netApi.readNamespacedNetworkPolicy({
+    const res = await withTimeout(netApi.readNamespacedNetworkPolicy({
       name: policyName,
       namespace: namespace || 'default',
-    });
+    }), DEFAULT_TIMEOUT_MS, signal);
 
     return res;
   } catch {
@@ -330,7 +351,8 @@ export async function readNetworkPolicy(
 export async function applyNetworkPolicy(
   namespace: string,
   body: any,
-  ref?: StepRef
+  ref?: StepRef,
+  signal?: AbortSignal
 ): Promise<void> {
   const { net } = getKubeClients();
   const start = Date.now();
@@ -340,7 +362,7 @@ export async function applyNetworkPolicy(
     await withTimeout((net as any).createNamespacedNetworkPolicy({
       namespace: namespace || 'default',
       body,
-    }));
+    }), DEFAULT_TIMEOUT_MS, signal);
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
@@ -380,7 +402,8 @@ export async function replaceNetworkPolicy(
   namespace: string,
   policyName: string,
   body: any,
-  ref?: StepRef
+  ref?: StepRef,
+  signal?: AbortSignal
 ): Promise<void> {
   const { net } = getKubeClients();
   const start = Date.now();
@@ -391,7 +414,7 @@ export async function replaceNetworkPolicy(
       name: policyName,
       namespace: namespace || 'default',
       body,
-    }));
+    }), DEFAULT_TIMEOUT_MS, signal);
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
@@ -431,7 +454,8 @@ export async function upsertNetworkPolicy(
   namespace: string,
   policyName: string,
   spec: any,
-  ref?: StepRef
+  ref?: StepRef,
+  signal?: AbortSignal
 ): Promise<void> {
   const { net } = getKubeClients();
   const start = Date.now();
@@ -452,7 +476,7 @@ export async function upsertNetworkPolicy(
       await (net as any).createNamespacedNetworkPolicy({
         namespace: namespace || 'default',
         body: spec
-      });
+      }, DEFAULT_TIMEOUT_MS, signal);
     }
 
     if (ref) {
@@ -493,7 +517,8 @@ export async function upsertNetworkPolicy(
 export async function deleteNetworkPolicy(
   namespace: string,
   policyName: string,
-  ref?: StepRef
+  ref?: StepRef,
+  signal?: AbortSignal
 ): Promise<void> {
   const { net } = getKubeClients();
   const start = Date.now();
@@ -503,7 +528,7 @@ export async function deleteNetworkPolicy(
     await withTimeout((net as any).deleteNamespacedNetworkPolicy({
       name: policyName,
       namespace: namespace || 'default'
-    }));
+    }), DEFAULT_TIMEOUT_MS, signal);
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
@@ -543,7 +568,8 @@ export async function execCommandInPod(
   podName: string,
   containerName: string,
   command: string[],
-  ref?: StepRef
+  ref?: StepRef,
+  signal?: AbortSignal
 ): Promise<{ stdout: string; stderr: string; code: number }> {
     const { exec } = getKubeClients();
     const start = Date.now();
@@ -599,6 +625,15 @@ export async function execCommandInPod(
                 resolve({ stdout: stdoutData, stderr: stderrData, code });
             }
         );
+
+        if (signal) {
+          signal.addEventListener('abort', () => {
+             console.log(`[Simulator:${ref?.simulationId ?? 'unknown'}] [K8s Ops] Aborting exec command in pod ${podName}`);
+             // Note: @kubernetes/client-node exec doesn't have a direct 'abort' method on the returned promise
+             // but we can at least reject the promise here to unblock the caller.
+             reject(new Error('AbortError'));
+          }, { once: true });
+        }
 
         execPromise.catch((err) => {
           console.error(`[Simulator:${ref?.simulationId ?? 'unknown'}] [K8s Ops] Exec exception in pod ${podName}:`, err);
