@@ -33,8 +33,8 @@ const stateIcon: Record<string, React.ReactNode> = {
 // ─── Step type display config ────────────────────────────────────────────────
 const stepTypeConfig: Record<string, { dot: string; badge: string; label: string }> = {
   validation: { dot: 'bg-sky-500', badge: 'bg-sky-900/60 text-sky-300', label: 'Validation' },
-  execution:  { dot: 'bg-indigo-500', badge: 'bg-indigo-900/60 text-indigo-300', label: 'Execution' },
-  rollback:   { dot: 'bg-amber-500', badge: 'bg-amber-900/60 text-amber-300', label: 'Rollback' },
+  execution: { dot: 'bg-indigo-500', badge: 'bg-indigo-900/60 text-indigo-300', label: 'Execution' },
+  rollback: { dot: 'bg-amber-500', badge: 'bg-amber-900/60 text-amber-300', label: 'Rollback' },
 };
 
 // ─── Rollback status helpers ─────────────────────────────────────────────────
@@ -99,9 +99,9 @@ export default function SimulationDetailPage() {
   const state = sim?.state ?? 'unknown';
   const stateVariant = state === 'completed' ? 'success'
     : state === 'failed' || state === 'rollback_failed' ? 'error'
-    : ['rolled_back', 'partial_rollback', 'rolling_back', 'rollback_pending'].includes(state) ? 'warning'
-    : state === 'running' ? 'default'
-    : 'neutral';
+      : ['rolled_back', 'partial_rollback', 'rolling_back', 'rollback_pending'].includes(state) ? 'warning'
+        : state === 'running' ? 'default'
+          : 'neutral';
   const canStop = user?.role === 'admin' || (user?.role === 'engineer' && sim?.createdById === user?.id);
   const rbStatus = deriveRollbackStatus(recoveryActions, sim);
 
@@ -483,14 +483,18 @@ export default function SimulationDetailPage() {
               ) : (
                 <div className="relative pl-8 space-y-6 before:absolute before:left-[11px] before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-800">
                   {steps.map((step: any) => {
-                    const tc = stepTypeConfig[step.stepType] ?? stepTypeConfig.execution;
+                    const tc = stepTypeConfig[step.stepType as keyof typeof stepTypeConfig] ?? {
+                      dot: "bg-slate-700",
+                      badge: "bg-slate-700 text-slate-200",
+                      label: "step"
+                    };
                     const isFailed = step.status === 'failed';
                     const isSuccess = step.status === 'success';
                     return (
                       <div key={step.id} className="relative">
                         <div className={cn(
                           "absolute -left-10 mt-1.5 h-6 w-6 rounded-full border-4 border-slate-950 flex items-center justify-center",
-                          isFailed ? 'bg-red-500' : isSuccess ? tc.dot : 'bg-slate-700'
+                          isFailed ? 'bg-red-500' : isSuccess ? (tc?.dot ?? 'bg-green-500') : 'bg-slate-700'
                         )}>
                           <div className="h-1.5 w-1.5 rounded-full bg-white" />
                         </div>
