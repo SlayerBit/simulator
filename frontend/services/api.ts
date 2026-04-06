@@ -61,6 +61,8 @@ export const api = {
     request<{ simulation: any }>(`/api/simulations/${id}/retry`, { method: 'POST', token }),
   rollbackSimulation: (token: string, id: string) =>
     request<{ id: string; status: string }>(`/api/simulations/${id}/rollback`, { method: 'POST', token }),
+  getMethodsMeta: (token: string) =>
+    request<{ methods: any[] }>('/api/simulations/meta', { method: 'GET', token }),
 
   // Templates
   listTemplates: (token: string) => request<{ templates: any[] }>('/api/templates', { method: 'GET', token }),

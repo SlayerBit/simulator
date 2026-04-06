@@ -16,6 +16,7 @@ spec:
         app: simulator-backend
     spec:
       serviceAccountName: simulator-sa
+      automountServiceAccountToken: true
       containers:
         - name: backend
           image: gcr.io/food-app-backend-01/simulator-backend:latest

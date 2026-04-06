@@ -9,7 +9,11 @@ export type ExperimentState =
   | 'failure_active'
   | 'completed'
   | 'failed'
+  | 'rollback_pending'
+  | 'rolling_back'
   | 'rolled_back'
+  | 'rollback_failed'
+  | 'partial_rollback'
   | 'cancelled';
 
 export type FailureType =

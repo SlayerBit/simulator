@@ -12,7 +12,7 @@ const DEFAULT_TIMEOUT_MS = 30000;
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<T> {
   let timeoutId: NodeJS.Timeout;
-  
+
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutId = setTimeout(() => {
       reject(new Error(`Operation timed out after ${timeoutMs}ms`));
@@ -39,6 +39,14 @@ export interface PatchSpec {
   contentType: string;
 }
 
+const DEFAULT_NAMESPACE = 'default';
+
+function ensureNamespace(namespace: string | null | undefined): string {
+  if (!namespace) return DEFAULT_NAMESPACE;
+  if (namespace === 'undefined' || namespace === 'null') return DEFAULT_NAMESPACE;
+  return namespace;
+}
+
 export function strategicMergePatch(body: unknown): PatchSpec {
   return {
     body,
@@ -53,6 +61,39 @@ export function jsonMergePatch(body: unknown): PatchSpec {
   };
 }
 
+// BUG-19 fix: Cached patch API clients keyed by content type.
+const patchClientCache = new Map<string, any>();
+
+function getCachedPatchClient(appsApi: AppsV1Api, contentType: string): any {
+  const cached = patchClientCache.get(contentType);
+  if (cached) return cached;
+
+  try {
+    const { Configuration, AppsV1Api: FreshAppsApi } = require('@kubernetes/client-node');
+    const originalConfig = (appsApi as any).configuration;
+    if (originalConfig) {
+      const patchApi = new FreshAppsApi(new Configuration({
+        baseServer: originalConfig.baseServer,
+        authMethods: originalConfig.authMethods,
+        httpApi: originalConfig.httpApi,
+        middleware: [
+          ...(originalConfig.middleware || []),
+          {
+            pre: async (context: any) => {
+              context.setHeaderParam('Content-Type', contentType);
+            }
+          }
+        ]
+      }));
+      patchClientCache.set(contentType, patchApi);
+      return patchApi;
+    }
+  } catch (e) {
+    console.warn('[K8s Ops] Failed to create cached patch client, falling back:', e);
+  }
+  return appsApi;
+}
+
 export async function scaleDeployment(
   namespace: string,
   deploymentName: string,
@@ -61,31 +102,29 @@ export async function scaleDeployment(
   signal?: AbortSignal
 ): Promise<void> {
   const { apps } = getKubeClients();
+  const ns = ensureNamespace(namespace);
   const start = Date.now();
 
   try {
     const appsApi = apps as AppsV1Api;
-    console.log(`[K8s Ops] Scaling deployment ${deploymentName} in ${namespace || 'default'} to ${replicas}...`);
-    
+    console.log(`[K8s Ops] Scaling deployment ${deploymentName} in ${ns} to ${replicas}...`);
+
     await withTimeout(
-      (appsApi as any).patchNamespacedDeploymentScale(
-        {
-          name: deploymentName,
-          namespace: namespace || 'default',
-          body: [
-            {
-              op: 'replace',
-              path: '/spec/replicas',
-              value: replicas
-            }
-          ]
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json-patch+json'
+      (appsApi as any).replaceNamespacedDeploymentScale({
+        name: deploymentName,
+        namespace: ns,
+        body: {
+          apiVersion: 'autoscaling/v1',
+          kind: 'Scale',
+          metadata: {
+            name: deploymentName,
+            namespace: ns
+          },
+          spec: {
+            replicas
           }
         }
-      ),
+      }),
       DEFAULT_TIMEOUT_MS,
       signal
     );
@@ -97,11 +136,11 @@ export async function scaleDeployment(
         failureType: ref.failureType,
         stepType: 'execution',
         status: 'success',
-        command: `kubectl scale deployment ${deploymentName} --replicas=${replicas} -n ${namespace || 'default'}`,
+        command: `kubectl scale deployment ${deploymentName} --replicas=${replicas} -n ${ns}`,
         message: `Scaled deployment to ${replicas}`,
         resourceType: 'Deployment',
         resourceName: deploymentName,
-        namespace: namespace || 'default',
+        namespace: ns,
         durationMs: Date.now() - start,
       });
     }
@@ -114,11 +153,11 @@ export async function scaleDeployment(
         failureType: ref.failureType,
         stepType: 'execution',
         status: 'failed',
-        command: `kubectl scale deployment ${deploymentName} --replicas=${replicas} -n ${namespace || 'default'}`,
+        command: `kubectl scale deployment ${deploymentName} --replicas=${replicas} -n ${ns}`,
         error: e.message ?? String(e),
         resourceType: 'Deployment',
         resourceName: deploymentName,
-        namespace: namespace || 'default',
+        namespace: ns,
         durationMs: Date.now() - start,
       });
     }
@@ -133,11 +172,12 @@ export async function readDeployment(
   signal?: AbortSignal
 ): Promise<any> {
   const { apps } = getKubeClients();
+  const ns = ensureNamespace(namespace);
 
-  console.log(`[K8s Ops] Reading deployment ${deploymentName} in ${namespace || 'default'}...`);
+  console.log(`[K8s Ops] Reading deployment ${deploymentName} in ${ns}...`);
   const dep = await withTimeout((apps as any).readNamespacedDeployment({
     name: deploymentName,
-    namespace: namespace || 'default',
+    namespace: ns
   }), DEFAULT_TIMEOUT_MS, signal) as any;
 
   return dep.body ?? dep;
@@ -151,15 +191,30 @@ export async function replaceDeployment(
   signal?: AbortSignal
 ): Promise<void> {
   const { apps } = getKubeClients();
-
+  const ns = ensureNamespace(namespace);
   const start = Date.now();
+
   try {
     const appsApi = apps as AppsV1Api;
-    console.log(`[K8s Ops] Replacing deployment ${deploymentName} in ${namespace || 'default'}...`);
-    await withTimeout(appsApi.replaceNamespacedDeployment({
+    console.log(`[K8s Ops] Replacing deployment ${deploymentName} in ${ns}...`);
+    // BUG-27 fix: Strip cluster-assigned fields to avoid 409 Conflict on stale resourceVersion.
+    const cleanBody = JSON.parse(JSON.stringify(body));
+    if (cleanBody.metadata) {
+      delete cleanBody.metadata.resourceVersion;
+      delete cleanBody.metadata.managedFields;
+      delete cleanBody.metadata.uid;
+      delete cleanBody.metadata.creationTimestamp;
+      delete cleanBody.metadata.generation;
+    }
+    delete cleanBody.status;
+    if (!cleanBody.metadata) cleanBody.metadata = {};
+    cleanBody.metadata.name = deploymentName;
+    cleanBody.metadata.namespace = ns;
+
+    await withTimeout((appsApi as any).replaceNamespacedDeployment({
       name: deploymentName,
-      namespace: namespace || 'default',
-      body,
+      namespace: ns,
+      body: cleanBody
     }), DEFAULT_TIMEOUT_MS, signal);
     if (ref) {
       await recordSimulationStep({
@@ -168,11 +223,11 @@ export async function replaceDeployment(
         failureType: ref.failureType,
         stepType: 'rollback',
         status: 'success',
-        command: `kubectl replace deployment ${deploymentName} -n ${namespace || 'default'}`,
+        command: `kubectl replace deployment ${deploymentName} -n ${ns}`,
         message: 'Restored deployment from snapshot',
         resourceType: 'Deployment',
         resourceName: deploymentName,
-        namespace: namespace || 'default',
+        namespace: ns,
         durationMs: Date.now() - start,
       });
     }
@@ -184,11 +239,11 @@ export async function replaceDeployment(
         failureType: ref.failureType,
         stepType: 'rollback',
         status: 'failed',
-        command: `kubectl replace deployment ${deploymentName} -n ${namespace || 'default'}`,
+        command: `kubectl replace deployment ${deploymentName} -n ${ns}`,
         error: e.message ?? String(e),
         resourceType: 'Deployment',
         resourceName: deploymentName,
-        namespace: namespace || 'default',
+        namespace: ns,
         durationMs: Date.now() - start,
       });
     }
@@ -203,9 +258,10 @@ export async function listPodsBySelector(
 ): Promise<any[]> {
   const { core } = getKubeClients();
   const coreApi = core as any;
+  const ns = ensureNamespace(namespace);
   const res = await withTimeout(coreApi.listNamespacedPod({
-    namespace: namespace || 'default',
-    labelSelector,
+    namespace: ns,
+    labelSelector
   }), DEFAULT_TIMEOUT_MS, signal) as any;
   return res?.body?.items || res?.items || [];
 }
@@ -216,20 +272,29 @@ export async function deletePodsBySelector(
   ref?: StepRef,
   signal?: AbortSignal
 ): Promise<number> {
+  const ns = ensureNamespace(namespace);
   const start = Date.now();
   try {
-    const items = await listPodsBySelector(namespace, labelSelector, signal);
+    const items = await listPodsBySelector(ns, labelSelector, signal);
     const { core } = getKubeClients();
 
+    let deletedCount = 0;
     for (const pod of items) {
       if (!pod?.metadata?.name) continue;
 
+      // BUG-31 fix: Skip pods without ownerReferences (bare pods)
+      if (!pod.metadata.ownerReferences || pod.metadata.ownerReferences.length === 0) {
+        console.warn(`[K8s Ops] Skipping bare pod ${pod.metadata.name} (no owner controller, deletion is irreversible)`);
+        continue;
+      }
+
       const coreApi = core as CoreV1Api;
-      console.log(`[K8s Ops] Deleting pod ${pod.metadata.name!} in ${namespace || 'default'}...`);
-      await withTimeout(coreApi.deleteNamespacedPod({
+      console.log(`[K8s Ops] Deleting pod ${pod.metadata.name!} in ${ns}...`);
+      await withTimeout((coreApi as any).deleteNamespacedPod({
         name: pod.metadata.name!,
-        namespace: namespace || 'default',
+        namespace: ns
       }), DEFAULT_TIMEOUT_MS, signal);
+      deletedCount++;
     }
 
     if (ref) {
@@ -239,15 +304,15 @@ export async function deletePodsBySelector(
         failureType: ref.failureType,
         stepType: 'execution',
         status: 'success',
-        command: `kubectl delete pod -l ${labelSelector} -n ${namespace || 'default'}`,
-        message: `Deleted ${items.length} pods matching selector`,
+        command: `kubectl delete pod -l ${labelSelector} -n ${ns}`,
+        message: `Deleted ${deletedCount} managed pods (skipped bare pods)`,
         resourceType: 'Pod',
         resourceName: labelSelector,
-        namespace: namespace || 'default',
+        namespace: ns,
         durationMs: Date.now() - start,
       });
     }
-    return items.length;
+    return deletedCount;
   } catch (e: any) {
     if (ref) {
       await recordSimulationStep({
@@ -256,11 +321,11 @@ export async function deletePodsBySelector(
         failureType: ref.failureType,
         stepType: 'execution',
         status: 'failed',
-        command: `kubectl delete pod -l ${labelSelector} -n ${namespace || 'default'}`,
+        command: `kubectl delete pod -l ${labelSelector} -n ${ns}`,
         error: e.message ?? String(e),
         resourceType: 'Pod',
         resourceName: labelSelector,
-        namespace: namespace || 'default',
+        namespace: ns,
         durationMs: Date.now() - start,
       });
     }
@@ -276,23 +341,21 @@ export async function patchDeploymentTemplate(
   signal?: AbortSignal
 ): Promise<void> {
   const { apps } = getKubeClients();
+  const ns = ensureNamespace(namespace);
   const start = Date.now();
 
   try {
     const appsApi = apps as AppsV1Api;
-    console.log(`[K8s Ops] Patching deployment ${deploymentName} in ${namespace || 'default'}...`);
-    await withTimeout(appsApi.patchNamespacedDeployment(
-      {
-        name: deploymentName,
-        namespace: namespace || 'default',
-        body: patch.body,
-      },
-      {
-        headers: {
-          'Content-Type': patch.contentType
-        }
-      } as any
-    ), DEFAULT_TIMEOUT_MS, signal);
+    console.log(`[K8s Ops] Patching deployment ${deploymentName} in ${ns}...`);
+
+    // BUG-19 fix: Use cached patch client instead of creating a new one per call.
+    const patchApi = getCachedPatchClient(appsApi, patch.contentType);
+
+    await withTimeout(patchApi.patchNamespacedDeployment({
+      name: deploymentName,
+      namespace: ns,
+      body: patch.body
+    }), DEFAULT_TIMEOUT_MS, signal);
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
@@ -300,11 +363,11 @@ export async function patchDeploymentTemplate(
         failureType: ref.failureType,
         stepType: 'execution',
         status: 'success',
-        command: `kubectl patch deployment ${deploymentName} -n ${namespace || 'default'} --type merge --patch '...'`,
+        command: `kubectl patch deployment ${deploymentName} -n ${ns} --type merge --patch '...'`,
         message: 'Patched deployment successfully',
         resourceType: 'Deployment',
         resourceName: deploymentName,
-        namespace: namespace || 'default',
+        namespace: ns,
         durationMs: Date.now() - start,
       });
     }
@@ -316,11 +379,11 @@ export async function patchDeploymentTemplate(
         failureType: ref.failureType,
         stepType: 'execution',
         status: 'failed',
-        command: `kubectl patch deployment ${deploymentName} -n ${namespace || 'default'} --type merge --patch '...'`,
+        command: `kubectl patch deployment ${deploymentName} -n ${ns} --type merge --patch '...'`,
         error: e.message ?? String(e),
         resourceType: 'Deployment',
         resourceName: deploymentName,
-        namespace: namespace || 'default',
+        namespace: ns,
         durationMs: Date.now() - start,
       });
     }
@@ -334,17 +397,22 @@ export async function readNetworkPolicy(
   signal?: AbortSignal
 ): Promise<any | null> {
   const { net } = getKubeClients();
+  const ns = ensureNamespace(namespace);
 
   try {
-    const netApi = net as NetworkingV1Api;
-    const res = await withTimeout(netApi.readNamespacedNetworkPolicy({
+    const netApi = net as any;
+    const res: any = await withTimeout(netApi.readNamespacedNetworkPolicy({
       name: policyName,
-      namespace: namespace || 'default',
+      namespace: ns
     }), DEFAULT_TIMEOUT_MS, signal);
 
-    return res;
-  } catch {
-    return null;
+    return res?.body ?? res;
+  } catch (e: any) {
+    // BUG-24 fix: Only treat 404 as "not found". Rethrow auth/server errors.
+    const status = e?.statusCode ?? e?.response?.statusCode ?? e?.body?.code;
+    if (status === 404 || status === undefined) return null;
+    console.error(`[K8s Ops] Failed to read NetworkPolicy ${policyName} in ${ns}:`, e?.message ?? e);
+    throw e;
   }
 }
 
@@ -355,13 +423,22 @@ export async function applyNetworkPolicy(
   signal?: AbortSignal
 ): Promise<void> {
   const { net } = getKubeClients();
+  const ns = ensureNamespace(namespace);
   const start = Date.now();
+  const netApi = net as any;
 
   try {
-    console.log(`[K8s Ops] Creating NetworkPolicy ${body.metadata?.name ?? 'unknown'} in ${namespace || 'default'}...`);
-    await withTimeout((net as any).createNamespacedNetworkPolicy({
-      namespace: namespace || 'default',
-      body,
+    console.log(`[K8s Ops] Creating NetworkPolicy in ${ns}...`);
+    const cleanBody = JSON.parse(JSON.stringify(body));
+    if (!cleanBody.metadata) cleanBody.metadata = {};
+    if (!cleanBody.metadata.name) {
+       // fallback to body.name or other if exists, but usually body IS the policy object
+    }
+    cleanBody.metadata.namespace = ns;
+
+    await withTimeout(netApi.createNamespacedNetworkPolicy({
+      namespace: ns,
+      body: cleanBody
     }), DEFAULT_TIMEOUT_MS, signal);
     if (ref) {
       await recordSimulationStep({
@@ -370,11 +447,11 @@ export async function applyNetworkPolicy(
         failureType: ref.failureType,
         stepType: 'execution',
         status: 'success',
-        command: `kubectl apply -f [network policy config] -n ${namespace || 'default'}`,
+        command: `kubectl apply -f [network policy config] -n ${ns}`,
         message: `Created NetworkPolicy ${body.metadata?.name ?? 'unknown'}`,
         resourceType: 'NetworkPolicy',
         resourceName: body.metadata?.name ?? 'unknown',
-        namespace: namespace || 'default',
+        namespace: ns,
         durationMs: Date.now() - start,
       });
     }
@@ -386,11 +463,11 @@ export async function applyNetworkPolicy(
         failureType: ref.failureType,
         stepType: 'execution',
         status: 'failed',
-        command: `kubectl apply -f [network policy config] -n ${namespace || 'default'}`,
+        command: `kubectl apply -f [network policy config] -n ${ns}`,
         error: e.message ?? String(e),
         resourceType: 'NetworkPolicy',
         resourceName: body.metadata?.name ?? 'unknown',
-        namespace: namespace || 'default',
+        namespace: ns,
         durationMs: Date.now() - start,
       });
     }
@@ -406,14 +483,21 @@ export async function replaceNetworkPolicy(
   signal?: AbortSignal
 ): Promise<void> {
   const { net } = getKubeClients();
+  const ns = ensureNamespace(namespace);
   const start = Date.now();
+  const netApi = net as any;
 
   try {
-    console.log(`[K8s Ops] Replacing NetworkPolicy ${policyName} in ${namespace || 'default'}...`);
-    await withTimeout((net as any).replaceNamespacedNetworkPolicy({
+    console.log(`[K8s Ops] Replacing NetworkPolicy ${policyName} in ${ns}...`);
+    const cleanBody = JSON.parse(JSON.stringify(body));
+    if (!cleanBody.metadata) cleanBody.metadata = {};
+    cleanBody.metadata.name = policyName;
+    cleanBody.metadata.namespace = ns;
+
+    await withTimeout(netApi.replaceNamespacedNetworkPolicy({
       name: policyName,
-      namespace: namespace || 'default',
-      body,
+      namespace: ns,
+      body: cleanBody
     }), DEFAULT_TIMEOUT_MS, signal);
     if (ref) {
       await recordSimulationStep({
@@ -422,11 +506,11 @@ export async function replaceNetworkPolicy(
         failureType: ref.failureType,
         stepType: 'rollback',
         status: 'success',
-        command: `kubectl replace -f [network policy config] -n ${namespace || 'default'}`,
+        command: `kubectl replace -f [network policy config] -n ${ns}`,
         message: `Restored NetworkPolicy ${policyName}`,
         resourceType: 'NetworkPolicy',
         resourceName: policyName,
-        namespace: namespace || 'default',
+        namespace: ns,
         durationMs: Date.now() - start,
       });
     }
@@ -438,11 +522,11 @@ export async function replaceNetworkPolicy(
         failureType: ref.failureType,
         stepType: 'rollback',
         status: 'failed',
-        command: `kubectl replace -f [network policy config] -n ${namespace || 'default'}`,
+        command: `kubectl replace -f [network policy config] -n ${ns}`,
         error: e.message ?? String(e),
         resourceType: 'NetworkPolicy',
         resourceName: policyName,
-        namespace: namespace || 'default',
+        namespace: ns,
         durationMs: Date.now() - start,
       });
     }
@@ -458,25 +542,38 @@ export async function upsertNetworkPolicy(
   signal?: AbortSignal
 ): Promise<void> {
   const { net } = getKubeClients();
+  const ns = ensureNamespace(namespace);
   const start = Date.now();
+  const netApi = net as any;
 
   try {
+    // BUG-20 fix: Wrap all inner K8s calls in withTimeout to prevent indefinite blocking.
     try {
-      await (net as any).readNamespacedNetworkPolicy({
-        name: policyName,
-        namespace: namespace || 'default'
-      });
+      const cleanBody = JSON.parse(JSON.stringify(spec));
+      if (!cleanBody.metadata) cleanBody.metadata = {};
+      cleanBody.metadata.name = policyName;
+      cleanBody.metadata.namespace = ns;
 
-      await (net as any).replaceNamespacedNetworkPolicy({
+      await withTimeout(netApi.readNamespacedNetworkPolicy({
         name: policyName,
-        namespace: namespace || 'default',
-        body: spec
-      });
+        namespace: ns
+      }), DEFAULT_TIMEOUT_MS, signal);
+
+      await withTimeout(netApi.replaceNamespacedNetworkPolicy({
+        name: policyName,
+        namespace: ns,
+        body: cleanBody
+      }), DEFAULT_TIMEOUT_MS, signal);
     } catch {
-      await (net as any).createNamespacedNetworkPolicy({
-        namespace: namespace || 'default',
-        body: spec
-      }, DEFAULT_TIMEOUT_MS, signal);
+      const cleanBody = JSON.parse(JSON.stringify(spec));
+      if (!cleanBody.metadata) cleanBody.metadata = {};
+      cleanBody.metadata.name = policyName;
+      cleanBody.metadata.namespace = ns;
+
+      await withTimeout(netApi.createNamespacedNetworkPolicy({
+        namespace: ns,
+        body: cleanBody
+      }), DEFAULT_TIMEOUT_MS, signal);
     }
 
     if (ref) {
@@ -486,11 +583,11 @@ export async function upsertNetworkPolicy(
         failureType: ref.failureType,
         stepType: 'execution',
         status: 'success',
-        command: `kubectl apply -f [network policy config] -n ${namespace || 'default'}`,
+        command: `kubectl apply -f [network policy config] -n ${ns}`,
         message: `Upserted NetworkPolicy ${policyName}`,
         resourceType: 'NetworkPolicy',
         resourceName: policyName,
-        namespace: namespace || 'default',
+        namespace: ns,
         durationMs: Date.now() - start,
       });
     }
@@ -502,11 +599,11 @@ export async function upsertNetworkPolicy(
         failureType: ref.failureType,
         stepType: 'execution',
         status: 'failed',
-        command: `kubectl apply -f [network policy config] -n ${namespace || 'default'}`,
+        command: `kubectl apply -f [network policy config] -n ${ns}`,
         error: e.message ?? String(e),
         resourceType: 'NetworkPolicy',
         resourceName: policyName,
-        namespace: namespace || 'default',
+        namespace: ns,
         durationMs: Date.now() - start,
       });
     }
@@ -521,13 +618,15 @@ export async function deleteNetworkPolicy(
   signal?: AbortSignal
 ): Promise<void> {
   const { net } = getKubeClients();
+  const ns = ensureNamespace(namespace);
   const start = Date.now();
+  const netApi = net as any;
 
   try {
-    console.log(`[K8s Ops] Deleting NetworkPolicy ${policyName} in ${namespace || 'default'}...`);
-    await withTimeout((net as any).deleteNamespacedNetworkPolicy({
+    console.log(`[K8s Ops] Deleting NetworkPolicy ${policyName} in ${ns}...`);
+    await withTimeout(netApi.deleteNamespacedNetworkPolicy({
       name: policyName,
-      namespace: namespace || 'default'
+      namespace: ns
     }), DEFAULT_TIMEOUT_MS, signal);
     if (ref) {
       await recordSimulationStep({
@@ -536,11 +635,11 @@ export async function deleteNetworkPolicy(
         failureType: ref.failureType,
         stepType: 'rollback',
         status: 'success',
-        command: `kubectl delete networkpolicy ${policyName} -n ${namespace || 'default'}`,
+        command: `kubectl delete networkpolicy ${policyName} -n ${ns}`,
         message: `Deleted NetworkPolicy ${policyName}`,
         resourceType: 'NetworkPolicy',
         resourceName: policyName,
-        namespace: namespace || 'default',
+        namespace: ns,
         durationMs: Date.now() - start,
       });
     }
@@ -552,14 +651,16 @@ export async function deleteNetworkPolicy(
         failureType: ref.failureType,
         stepType: 'rollback',
         status: 'failed',
-        command: `kubectl delete networkpolicy ${policyName} -n ${namespace || 'default'}`,
+        command: `kubectl delete networkpolicy ${policyName} -n ${ns}`,
         error: e.message ?? String(e),
         resourceType: 'NetworkPolicy',
         resourceName: policyName,
-        namespace: namespace || 'default',
+        namespace: ns,
         durationMs: Date.now() - start,
       });
     }
+    // BUG-21 fix: Rethrow so the caller knows deletion failed.
+    throw e;
   }
 }
 
@@ -571,73 +672,79 @@ export async function execCommandInPod(
   ref?: StepRef,
   signal?: AbortSignal
 ): Promise<{ stdout: string; stderr: string; code: number }> {
-    const { exec } = getKubeClients();
-    const start = Date.now();
+  const { exec } = getKubeClients();
+  const ns = ensureNamespace(namespace);
+  const start = Date.now();
 
-    return new Promise((resolve, reject) => {
-        let stdoutData = '';
-        let stderrData = '';
+  // BUG-23 fix: Add settled flag to prevent double-resolution race.
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let stdoutData = '';
+    let stderrData = '';
 
-        console.log(`[Simulator:${ref?.simulationId ?? 'unknown'}] [K8s Ops] Executing command in pod ${podName}: ${command.join(' ')}`);
+    console.log(`[Simulator:${ref?.simulationId ?? 'unknown'}] [K8s Ops] Executing command in pod ${podName}: ${command.join(' ')}`);
 
-        // Use PassThrough streams for stdin, stdout, and stderr
-        const stream = new (require('stream').PassThrough)();
-        const errStream = new (require('stream').PassThrough)();
+    const stream = new (require('stream').PassThrough)();
+    const errStream = new (require('stream').PassThrough)();
 
-        stream.on('data', (chunk: Buffer) => {
-          stdoutData += chunk.toString();
-        });
-        errStream.on('data', (chunk: Buffer) => {
-          stderrData += chunk.toString();
-        });
+    stream.on('data', (chunk: Buffer) => {
+      stdoutData += chunk.toString();
+    });
+    errStream.on('data', (chunk: Buffer) => {
+      stderrData += chunk.toString();
+    });
 
-        const execPromise = exec.exec(
-            namespace || 'default',
-            podName,
-            containerName,
-            command,
-            stream,
-            errStream,
-            null, // stdin
-            false, // tty
-            (status: any) => {
-                const code = status?.status === 'Success' ? 0 : (status?.code ?? 1);
-                const duration = Date.now() - start;
+    const execPromise = exec.exec(
+      ns,
+      podName,
+      containerName,
+      command,
+      stream,
+      errStream,
+      null,
+      false,
+      (status: any) => {
+        if (settled) return;
+        settled = true;
+        const code = status?.status === 'Success' ? 0 : (status?.code ?? 1);
+        const duration = Date.now() - start;
 
-                console.log(`[Simulator:${ref?.simulationId ?? 'unknown'}] [K8s Ops] Exec command finished with code ${code}. Output length: ${stdoutData.length}, Error length: ${stderrData.length}`);
+        console.log(`[Simulator:${ref?.simulationId ?? 'unknown'}] [K8s Ops] Exec command finished with code ${code}. Output length: ${stdoutData.length}, Error length: ${stderrData.length}`);
 
-                if (ref) {
-                    void recordSimulationStep({
-                        simulationId: ref.simulationId,
-                        name: ref.name,
-                        failureType: ref.failureType,
-                        stepType: 'execution',
-                        status: code === 0 ? 'success' : 'failed',
-                        command: `kubectl exec -n ${namespace} ${podName} -c ${containerName} -- ${command.join(' ')}`,
-                        message: code === 0 ? `Executed command successfully: ${stdoutData.slice(0, 50)}...` : `Command failed: ${stderrData.slice(0, 100)}`,
-                        resourceType: 'Pod',
-                        resourceName: podName,
-                        namespace: namespace || 'default',
-                        durationMs: duration,
-                    });
-                }
-
-                resolve({ stdout: stdoutData, stderr: stderrData, code });
-            }
-        );
-
-        if (signal) {
-          signal.addEventListener('abort', () => {
-             console.log(`[Simulator:${ref?.simulationId ?? 'unknown'}] [K8s Ops] Aborting exec command in pod ${podName}`);
-             // Note: @kubernetes/client-node exec doesn't have a direct 'abort' method on the returned promise
-             // but we can at least reject the promise here to unblock the caller.
-             reject(new Error('AbortError'));
-          }, { once: true });
+        if (ref) {
+          void recordSimulationStep({
+            simulationId: ref.simulationId,
+            name: ref.name,
+            failureType: ref.failureType,
+            stepType: 'execution',
+            status: code === 0 ? 'success' : 'failed',
+            command: `kubectl exec -n ${ns} ${podName} -c ${containerName} -- ${command.join(' ')}`,
+            message: code === 0 ? `Executed command successfully: ${stdoutData.slice(0, 50)}...` : `Command failed: ${stderrData.slice(0, 100)}`,
+            resourceType: 'Pod',
+            resourceName: podName,
+            namespace: ns,
+            durationMs: duration,
+          });
         }
 
-        execPromise.catch((err) => {
-          console.error(`[Simulator:${ref?.simulationId ?? 'unknown'}] [K8s Ops] Exec exception in pod ${podName}:`, err);
-          reject(err);
-        });
+        resolve({ stdout: stdoutData, stderr: stderrData, code });
+      }
+    );
+
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        if (settled) return;
+        settled = true;
+        console.log(`[Simulator:${ref?.simulationId ?? 'unknown'}] [K8s Ops] Aborting exec command in pod ${podName}`);
+        reject(new Error('AbortError'));
+      }, { once: true });
+    }
+
+    execPromise.catch((err) => {
+      if (settled) return;
+      settled = true;
+      console.error(`[Simulator:${ref?.simulationId ?? 'unknown'}] [K8s Ops] Exec exception in pod ${podName}:`, err);
+      reject(err);
     });
+  });
 }

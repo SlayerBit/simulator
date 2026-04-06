@@ -18,14 +18,16 @@ export async function recordSimulationStep(params: {
     name: string;
     failureType: string;
     stepType: 'validation' | 'execution' | 'rollback';
+    /** Optional lifecycle phase tag for UI grouping */
+    phase?: 'pre-flight' | 'chaos' | 'recovery';
     status: 'pending' | 'running' | 'success' | 'failed' | 'rolled_back';
-    command?: string;
-    message?: string;
-    error?: string;
-    resourceType?: string;
-    resourceName?: string;
-    namespace?: string;
-    durationMs?: number;
+    command?: string | null;
+    message?: string | null;
+    error?: string | null;
+    resourceType?: string | null;
+    resourceName?: string | null;
+    namespace?: string | null;
+    durationMs?: number | null;
 }): Promise<void> {
     const prisma = getPrismaClient();
     try {

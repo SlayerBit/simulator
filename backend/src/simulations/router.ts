@@ -45,7 +45,17 @@ simulationsRouter.post('/', authMiddleware(['admin', 'engineer']), async (req: R
   });
 
   // Fire-and-forget execution
+  // BUG-29 fix: Mark simulation as failed if runSimulation throws before claim.
   void runSimulation(sim.id).catch(async (e) => {
+    try {
+      const current = await prisma.simulation.findUnique({ where: { id: sim.id } });
+      if (current && ['pending', 'queued'].includes(current.state)) {
+        await prisma.simulation.update({
+          where: { id: sim.id },
+          data: { state: 'failed', completedAt: new Date() }
+        });
+      }
+    } catch {}
     await prisma.auditLog.create({
       data: {
         userId: user.id,
@@ -83,6 +93,18 @@ simulationsRouter.post('/:id/rollback', authMiddleware(['admin', 'engineer']), a
   } catch (e: any) {
     return res.status(400).json({ error: { message: e.message ?? String(e) } });
   }
+});
+
+// GET /api/simulations/meta
+simulationsRouter.get('/meta', authMiddleware(['admin', 'engineer', 'viewer']), async (req: Request, res: Response) => {
+  const { getFailureMethods } = await import('../failures/registry.js');
+  const methods = getFailureMethods().map(m => ({
+    id: m.id,
+    title: m.title,
+    supports: m.supports,
+    requirements: m.requirements || {}
+  }));
+  return res.json({ methods });
 });
 
 // GET /api/simulations
@@ -177,6 +199,8 @@ simulationsRouter.post('/:id/retry', authMiddleware(['admin', 'engineer']), asyn
       intensity: sim.intensity ?? null,
       durationSeconds: sim.durationSeconds,
       dryRun: sim.dryRun,
+      // BUG-08 fix: Copy manualRollback from original simulation.
+      manualRollback: sim.manualRollback,
       createdById: user.id,
     },
   });
@@ -203,7 +227,11 @@ simulationsRouter.post('/:id/dry-run', authMiddleware(['admin', 'engineer']), as
   if (!sim) return res.status(404).json({ error: { message: 'Not found' } });
   if (user.role !== 'admin' && sim.createdById !== user.id) return res.status(403).json({ error: { message: 'Forbidden' } });
 
-  // Reset state so runSimulation does not skip a terminated simulation.
+  // BUG-09 fix: Only allow dry-run re-trigger on failed or pending simulations.
+  if (['completed', 'running', 'cancelled'].includes(sim.state)) {
+    return res.status(409).json({ error: { message: `Cannot re-run dry-run on simulation in '${sim.state}' state` } });
+  }
+
   const updated = await prisma.simulation.update({
     where: { id },
     data: {

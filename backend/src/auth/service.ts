@@ -47,11 +47,20 @@ export async function createUser(email: string, password: string, role: UserRole
 }
 
 export async function ensureDefaultAdmin() {
-  const defaultEmail = 'slayer@slayer.com';
+  const defaultEmail = process.env.ADMIN_EMAIL || 'admin@simulator.local';
+  const defaultPassword = process.env.ADMIN_PASSWORD;
+  if (!defaultPassword) {
+    console.warn('[Auth] ADMIN_PASSWORD not set — skipping default admin seed. Set ADMIN_EMAIL and ADMIN_PASSWORD env vars to create a default admin.');
+    return;
+  }
+  if (defaultPassword.length < 8) {
+    console.warn('[Auth] ADMIN_PASSWORD is too short (min 8 chars) — skipping default admin seed.');
+    return;
+  }
   const existing = await findUserByEmail(defaultEmail);
   if (!existing) {
-    await createUser(defaultEmail, 'slayer', 'admin');
-    console.log('Default admin seeded: slayer@slayer.com');
+    await createUser(defaultEmail, defaultPassword, 'admin');
+    console.log(`Default admin seeded: ${defaultEmail}`);
   }
 }
 

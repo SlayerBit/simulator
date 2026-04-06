@@ -1,5 +1,9 @@
+import { recordSimulationStep } from '../simulations/steps.js';
+
 export interface RollbackAction {
   name: string;
+  description?: string;
+  command?: string;
   run: (signal?: AbortSignal) => Promise<void>;
 }
 
@@ -14,8 +18,23 @@ export class RollbackStack {
     return this.actions.length;
   }
 
-  async rollbackAll(signal?: AbortSignal): Promise<{ ok: boolean; errors: string[] }> {
+  async rollbackAll(
+    simulationId: string,
+    failureType: string,
+    signal?: AbortSignal
+  ): Promise<{ ok: boolean; errors: string[] }> {
     const errors: string[] = [];
+
+    // Phase 1: Recovery Triggered log
+    await recordSimulationStep({
+      simulationId,
+      name: 'Recovery Phase Started',
+      failureType,
+      stepType: 'rollback',
+      status: 'success',
+      message: 'Self-healing context initialized. Dispatched restoration sequence.',
+    });
+
     // Process in reverse order (LIFO)
     for (let i = this.actions.length - 1; i >= 0; i--) {
       if (signal?.aborted) {
@@ -24,6 +43,17 @@ export class RollbackStack {
       }
       const action = this.actions[i];
       if (!action) continue;
+
+      const actionStart = Date.now();
+      await recordSimulationStep({
+        simulationId,
+        name: `Restoring: ${action.name}`,
+        failureType,
+        stepType: 'rollback',
+        status: 'running',
+        command: action.command ?? null,
+        message: action.description ?? `Executing restoration step: ${action.name}`,
+      });
 
       let success = false;
       let lastError: any = null;
@@ -44,7 +74,6 @@ export class RollbackStack {
             const delay = Math.pow(2, attempt) * 1000;
             console.warn(`[Rollback] Action "${action.name}" failed (attempt ${attempt}/${maxRetries}). Retrying in ${delay}ms...`, e?.message ?? e);
             
-            // Wait with abort support
             await new Promise((resolve, reject) => {
               const t = setTimeout(resolve, delay);
               signal?.addEventListener('abort', () => {
@@ -56,12 +85,48 @@ export class RollbackStack {
         }
       }
 
-      if (!success) {
+      if (success) {
+        await recordSimulationStep({
+          simulationId,
+          name: `Restored: ${action.name}`,
+          failureType,
+          stepType: 'rollback',
+          status: 'success',
+          command: action.command ?? null,
+          message: `Successfully completed: ${action.name}`,
+          durationMs: Date.now() - actionStart,
+        });
+      } else {
         errors.push(`${action.name}: ${lastError?.message ?? String(lastError)} (failed after ${maxRetries} attempts)`);
         console.error(`[Rollback] Action "${action.name}" failed permanently after ${maxRetries} attempts.`);
+        
+        await recordSimulationStep({
+          simulationId,
+          name: `Failed: ${action.name}`,
+          failureType,
+          stepType: 'rollback',
+          status: 'failed',
+          command: action.command ?? null,
+          error: lastError?.message ?? String(lastError),
+          durationMs: Date.now() - actionStart,
+        });
+
         if (lastError?.name === 'AbortError') break;
       }
     }
+
+    // Final lifecycle log
+    await recordSimulationStep({
+      simulationId,
+      name: errors.length === 0 ? 'Recovery Phase Completed' : 'Recovery Phase Partial Failure',
+      failureType,
+      stepType: 'rollback',
+      status: errors.length === 0 ? 'success' : 'failed',
+      message: errors.length === 0 
+        ? 'System fully restored to stable state.' 
+        : `Recovery completed with ${errors.length} errors. Manual intervention may be required.`,
+    });
+
     return { ok: errors.length === 0, errors };
   }
 }

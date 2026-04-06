@@ -28,7 +28,11 @@ function parseNumberEnv(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+let cachedConfig: AppConfig | null = null;
+
 export function loadConfig(): AppConfig {
+  if (cachedConfig) return cachedConfig;
+
   const nodeEnv = (process.env.NODE_ENV as NodeEnv) || 'development';
   const port = parseNumberEnv('PORT', 4000);
 
@@ -76,7 +80,7 @@ export function loadConfig(): AppConfig {
     throw new Error('Missing required environment variable: DATABASE_URL');
   }
 
-  return {
+  const config: AppConfig = {
     nodeEnv,
     port,
     backendBaseUrl,
@@ -96,4 +100,7 @@ export function loadConfig(): AppConfig {
     maxPacketLossPercent,
     corsAllowedOrigins,
   };
+
+  cachedConfig = config;
+  return config;
 }
