@@ -1,0 +1,59 @@
+name: Deploy to GKE
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - 'deploy/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout repo
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Authenticate to Google Cloud
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      # 3. Setup gcloud CLI
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      # 4. Set project
+      - name: Set GCP Project
+        run: gcloud config set project food-app-backend-01
+
+      # 5. Configure Docker for GCR
+      - name: Configure Docker
+        run: gcloud auth configure-docker gcr.io
+
+      # 6. Build & Push Docker Image
+      - name: Build and Push Image
+        run: |
+          IMAGE=gcr.io/food-app-backend-01/simulator-backend:latest
+          docker buildx build --platform linux/amd64 -t $IMAGE ./backend --push
+
+      # 7. Get GKE credentials
+      - name: Get GKE credentials
+        run: |
+          gcloud container clusters get-credentials ${{ secrets.GKE_CLUSTER }} \
+            --zone ${{ secrets.GKE_ZONE }}
+
+      # 8. Deploy to Kubernetes
+      - name: Deploy to GKE
+        run: |
+          kubectl set image deployment/simulator-backend \
+            backend=gcr.io/food-app-backend-01/simulator-backend:latest \
+            -n simulator
+
+          kubectl rollout status deployment/simulator-backend -n simulator
+
+          kubectl get pods -n simulator
