@@ -1,5 +1,5 @@
 export type NodeEnv = 'development' | 'test' | 'production';
-
+import { z } from 'zod';
 export interface AppConfig {
   nodeEnv: NodeEnv;
   port: number;
@@ -20,7 +20,14 @@ export interface AppConfig {
   maxPacketLossPercent: number;
   corsAllowedOrigins: (string | RegExp)[];
 }
+const envSchema = z.object({
+  PORT: z.string().regex(/^\d+$/),
+  JWT_SECRET: z.string().min(10),
+  ALLOWED_TARGET_NAMESPACES: z.string(),
+  API_KEY: z.string().min(10),
+});
 
+envSchema.parse(process.env);
 function parseNumberEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -45,7 +52,13 @@ export function loadConfig(): AppConfig {
   const jwtSecret = process.env.JWT_SECRET;
   const simulatorNamespace = process.env.SIMULATOR_NAMESPACE || 'simulator';
   // Fix: Change line 43 to allow more namespaces or a broader default
-  const allowedTargetNamespaces = (process.env.ALLOWED_TARGET_NAMESPACES || 'simulator,default,production,staging')
+  const rawNamespaces = process.env.ALLOWED_TARGET_NAMESPACES;
+
+  if (!rawNamespaces) {
+    throw new Error('ALLOWED_TARGET_NAMESPACES must be set');
+  }
+
+  const allowedTargetNamespaces = rawNamespaces
     .split(',')
     .map((v) => v.trim())
     .filter(Boolean);
@@ -59,7 +72,10 @@ export function loadConfig(): AppConfig {
   const allowedOriginsEnv = process.env.CORS_ALLOWED_ORIGINS;
   const corsAllowedOrigins: (string | RegExp)[] = [];
   if (allowedOriginsEnv) {
-    for (const value of allowedOriginsEnv.split(',').map((v) => v.trim()).filter(Boolean)) {
+    for (const value of allowedOriginsEnv
+      .split(',')
+      .map((v) => v.trim())
+      .filter(Boolean)) {
       if (value.startsWith('/') && value.endsWith('/')) {
         const inner = value.slice(1, -1);
         corsAllowedOrigins.push(new RegExp(inner));

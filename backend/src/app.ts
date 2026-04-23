@@ -6,7 +6,6 @@ import { apiRouter } from './api/router.js';
 import { httpLogger } from './logging/logger.js';
 import { errorHandler } from './logging/error-handler.js';
 import { registerAllFailureMethods } from './failures/methods.js';
-
 export function createApp() {
   const config = loadConfig();
   const app = express();
@@ -18,7 +17,7 @@ export function createApp() {
     cors({
       origin: config.corsAllowedOrigins,
       credentials: true,
-    }),
+    })
   );
   app.use(httpLogger);
   app.use(express.json());
@@ -26,8 +25,6 @@ export function createApp() {
   app.get('/health', (_req, res) => {
     res.json({
       status: 'ok',
-      service: 'simulator-backend',
-      env: config.nodeEnv,
     });
   });
 
