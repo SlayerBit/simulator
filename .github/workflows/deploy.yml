@@ -39,7 +39,7 @@ jobs:
       - name: Build and Push Image
         run: |
           IMAGE=gcr.io/food-app-backend-01/simulator-backend:latest
-          docker buildx build --platform linux/amd64 -t $IMAGE ./backend --push
+           docker buildx build --platform linux/amd64 -t $IMAGE ./backend --push
 
       # 7. Get GKE credentials
       - name: Get GKE credentials
@@ -53,6 +53,8 @@ jobs:
           kubectl set image deployment/simulator-backend \
             backend=gcr.io/food-app-backend-01/simulator-backend:latest \
             -n simulator
+
+          kubectl rollout restart deployment/simulator-backend -n simulator
 
           kubectl rollout status deployment/simulator-backend -n simulator
 
