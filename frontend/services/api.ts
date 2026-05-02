@@ -23,7 +23,7 @@ async function request<T>(path: string, opts: RequestInit & { token?: string } =
   const res = await fetch(url, { ...opts, headers, cache: 'no-store' });
 
   // 401 Handling
-  if (res.status === 401 && typeof window !== 'undefined' && !path.includes('/auth/login')) {
+  if (res.status === 401 && typeof window !== 'undefined' && !path.includes('/api/auth/login')) {
     localStorage.removeItem(TOKEN_KEY);
     window.location.href = '/login?expired=true';
     throw new Error('Session expired');
