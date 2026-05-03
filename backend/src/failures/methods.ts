@@ -16,6 +16,33 @@ import {
   rolloutRestartDeployment,
   type StepRef,
 } from '../kubernetes/ops.js';
+
+const BASELINE_LIMIT_CPU = '200m';
+const BASELINE_LIMIT_MEM = '256Mi';
+
+function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      cleanup();
+      reject(Object.assign(new Error('AbortError'), { name: 'AbortError' }));
+    };
+    const cleanup = () => {
+      clearTimeout(t);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    if (signal?.aborted) {
+      cleanup();
+      reject(Object.assign(new Error('AbortError'), { name: 'AbortError' }));
+      return;
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
 import { recordSimulationStep } from '../simulations/steps.js';
 import { getPrismaClient } from '../database/client.js';
 
@@ -277,9 +304,10 @@ function selectorToMatchLabels(selector: string): Record<string, string> {
 // 1) Pod / Container Crash
 const podCrashDeletePods: FailureMethod = {
   id: 'delete-pods',
-  title: 'Delete pods temporarily (controller will recreate)',
+  title: 'Sustained pod disruption loop (repeated deletes for full duration)',
   supports: 'pod_crash',
   requirements: { requiresNamespace: true, requiresLabelSelector: true, requiresDuration: true },
+  consumesSimulationDurationInApply: true,
   validate: async (p) => {
     ensureTargetBasics(p);
     const sel = requireLabelSelector(p);
@@ -289,38 +317,46 @@ const podCrashDeletePods: FailureMethod = {
       err.status = 400;
       throw err;
     }
-    p.executionHints = { ...p.executionHints, prePodCount: items.length };
+    const interval = Math.max(3, Math.min(15, Math.floor(p.durationSeconds / 6) || 5));
+    p.executionHints = { ...p.executionHints, prePodCount: items.length, disruptionIntervalSec: interval };
   },
   dryRunPlan: (p) => {
     const n = p.executionHints?.prePodCount ?? 0;
+    const iv = p.executionHints?.disruptionIntervalSec ?? 5;
     const sel = p.target.labelSelector ?? '';
-    return `delete_pods: namespace=${p.target.namespace} selector=${sel} matched_pods=${n} (no deletes in dry-run)`;
+    return `disruption_loop: delete_pods namespace=${p.target.namespace} selector=${sel} matched=${n} every=${iv}s for ${p.durationSeconds}s (no API calls in dry-run)`;
   },
   apply: async (p) => {
-    const ref = { simulationId: p.simulationId, name: 'Delete Pods', failureType: p.failureType };
-    if (p.dryRun) return ok('Dry-run: would delete pods by selector');
-    console.log(`[Failure-Method] Executing delete-pods in namespace ${p.target.namespace} for selector ${p.target.labelSelector}`);
-    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref, p.signal);
-    p.executionHints = { ...p.executionHints, applyDeletedCount: count };
-    if (count === 0) {
-      throw new Error('delete-pods: no controller-owned pods were deleted (bare pods are skipped)');
+    const ref = { simulationId: p.simulationId, name: 'Delete Pods (loop)', failureType: p.failureType };
+    if (p.dryRun) return ok('Dry-run: would run sustained delete loop');
+    const sel = requireLabelSelector(p);
+    const intervalSec = p.executionHints?.disruptionIntervalSec ?? 5;
+    const deadline = Date.now() + p.durationSeconds * 1000;
+    let cycles = 0;
+    let totalDeleted = 0;
+    console.log(`[Failure-Method] delete-pods disruption loop every ${intervalSec}s for ${p.durationSeconds}s`);
+    while (Date.now() < deadline) {
+      if (p.signal?.aborted) {
+        throw Object.assign(new Error('AbortError'), { name: 'AbortError' });
+      }
+      const n = await deletePodsBySelector(p.target.namespace, sel, ref, p.signal);
+      totalDeleted += n;
+      cycles++;
+      if (n === 0) {
+        console.warn(`[Failure-Method] delete-pods cycle ${cycles}: no pods deleted (may be mid-rollout)`);
+      }
+      const remaining = deadline - Date.now();
+      if (remaining > 0) {
+        await sleepWithAbort(Math.min(intervalSec * 1000, remaining), p.signal);
+      }
     }
-    return ok(`Deleted ${count} pods`);
+    p.executionHints = { ...p.executionHints, disruptionCycles: cycles, applyDeletedCount: totalDeleted };
+    if (cycles === 0) throw new Error('delete-pods: disruption loop did not execute');
+    return ok(`Disruption loop completed: ${cycles} cycle(s), ${totalDeleted} pod delete(s) total`);
   },
   verifyApplied: async (p) => {
-    const sel = requireLabelSelector(p);
-    const items = await listPodsBySelector(p.target.namespace, sel, p.signal);
-    const pre = p.executionHints?.prePodCount ?? 0;
-    if (pre < 1) return;
-    const now = Date.now();
-    const fresh = items.some((pod) => {
-      const ts = pod.metadata?.creationTimestamp;
-      if (!ts) return false;
-      return now - new Date(ts).getTime() < 180000;
-    });
-    const draining = items.some((pod) => pod.metadata?.deletionTimestamp);
-    if (!fresh && !draining && items.length >= pre) {
-      throw new Error('Post-verify: expected terminating or newly created pods after delete-pods');
+    if ((p.executionHints?.disruptionCycles ?? 0) < 1) {
+      throw new Error('Post-verify: disruption loop did not record any cycles');
     }
   },
   rollback: async () => { },
@@ -328,51 +364,65 @@ const podCrashDeletePods: FailureMethod = {
 
 const podCrashRestartPods: FailureMethod = {
   id: 'restart-pods',
-  title: 'Restart pods via controlled delete (controller recreates)',
+  title: 'Crash-loop simulation (readiness always fails; restored from deployment snapshot)',
   supports: 'pod_crash',
-  requirements: { requiresNamespace: true, requiresLabelSelector: true, requiresDuration: true },
+  requirements: { requiresNamespace: true, requiresDeployment: true, requiresLabelSelector: true, requiresDuration: true },
   validate: async (p) => {
     ensureTargetBasics(p);
+    const dep = requireDeployment(p);
     const sel = requireLabelSelector(p);
-    const items = await listPodsBySelector(p.target.namespace, sel, p.signal);
-    if (items.length === 0) {
-      const err: any = new Error(`No pods match label selector "${sel}" — cannot restart pods`);
+    const cur = await readDeployment(p.target.namespace, dep, p.signal);
+    if (!cur) {
+      const err: any = new Error(`Deployment "${dep}" not found`);
       err.status = 400;
       throw err;
     }
-    p.executionHints = { ...p.executionHints, prePodCount: items.length };
+    const items = await listPodsBySelector(p.target.namespace, sel, p.signal);
+    if (items.length === 0) {
+      const err: any = new Error(`No pods match "${sel}" — selector must target pods of ${dep}`);
+      err.status = 400;
+      throw err;
+    }
   },
-  dryRunPlan: (p) => {
-    const n = p.executionHints?.prePodCount ?? 0;
-    return `restart_pods: namespace=${p.target.namespace} selector=${p.target.labelSelector} matched_pods=${n} (no deletes in dry-run)`;
-  },
+  dryRunPlan: (p) =>
+    `patch_deployment: ${requireDeployment(p)} set readinessProbe.exec=[false] on primary container (crash-loop / not-ready; dry-run; no API mutation)`,
   apply: async (p) => {
-    const ref = { simulationId: p.simulationId, name: 'Restart Pods', failureType: p.failureType };
-    if (p.dryRun) return ok('Dry-run: would delete pods to force restart');
-    const count = await deletePodsBySelector(p.target.namespace, requireLabelSelector(p), ref, p.signal);
-    p.executionHints = { ...p.executionHints, applyDeletedCount: count };
-    if (count === 0) throw new Error('restart-pods: no controller-owned pods were restarted');
-    p.rollback.push({
-      name: 'Verify self-healing after pod restart',
-      description: 'Controllers recreate deleted pods; no additional simulator rollback is required.',
-      run: async () => { },
-    });
-    return ok(`Restarted ${count} pods (deleted for recreate)`);
+    const ref = { simulationId: p.simulationId, name: 'Crash-loop readiness', failureType: p.failureType };
+    if (p.dryRun) return ok('Dry-run: would patch failing readiness probe');
+    const dep = requireDeployment(p);
+    const cname = await resolveMainContainerName(p.target.namespace, dep);
+    await snapshotDeployment(p, dep);
+    await patchDeploymentTemplate(p.target.namespace, dep, {
+      contentType: 'application/strategic-merge-patch+json',
+      body: {
+        spec: {
+          template: {
+            spec: {
+              containers: [
+                {
+                  name: cname,
+                  readinessProbe: {
+                    exec: { command: ['false'] },
+                    initialDelaySeconds: 1,
+                    periodSeconds: 2,
+                    failureThreshold: 1,
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    }, ref, p.signal);
+    return ok('Patched readiness probe to always fail (observable not-ready / crash-loop)');
   },
   verifyApplied: async (p) => {
-    const sel = requireLabelSelector(p);
-    const items = await listPodsBySelector(p.target.namespace, sel, p.signal);
-    const pre = p.executionHints?.prePodCount ?? 0;
-    if (pre < 1) return;
-    const now = Date.now();
-    const fresh = items.some((pod) => {
-      const ts = pod.metadata?.creationTimestamp;
-      if (!ts) return false;
-      return now - new Date(ts).getTime() < 180000;
-    });
-    const draining = items.some((pod) => pod.metadata?.deletionTimestamp);
-    if (!fresh && !draining && items.length >= pre) {
-      throw new Error('Post-verify: expected terminating or newly created pods after restart-pods');
+    const dep = requireDeployment(p);
+    const cur = await readDeployment(p.target.namespace, dep, p.signal);
+    const want = cur?.spec?.replicas ?? 1;
+    const ready = cur?.status?.readyReplicas ?? 0;
+    if (ready >= want) {
+      throw new Error(`Post-verify: expected unavailable pods (readyReplicas ${ready} vs spec.replicas ${want})`);
     }
   },
   rollback: async () => { },
@@ -526,7 +576,7 @@ const svcUnavailableScaleZero: FailureMethod = {
 
 const svcUnavailableScaleDownVisible: FailureMethod = {
   id: 'scale-down',
-  title: 'Scale deployment down to 1 replica',
+  title: 'Partial degradation — scale to max(1, floor(original × 0.5))',
   supports: 'service_unavailability',
   requirements: { requiresNamespace: true, requiresDeployment: true, requiresDuration: true },
   validate: async (p) => {
@@ -539,28 +589,37 @@ const svcUnavailableScaleDownVisible: FailureMethod = {
       throw err;
     }
     const r = cur.spec?.replicas ?? 1;
-    if (r <= 1) {
-      const err: any = new Error('Deployment already at 1 replica — scale-down would not reduce capacity');
+    const target = Math.max(1, Math.floor(r * 0.5));
+    if (r < 2) {
+      const err: any = new Error('Partial degradation requires at least 2 desired replicas');
       err.status = 400;
       throw err;
     }
-    p.executionHints = { ...p.executionHints, preScaleReplicas: r, scaleTargetReplicas: 1 };
+    if (target >= r) {
+      const err: any = new Error(`Computed target replicas ${target} would not reduce capacity (original ${r})`);
+      err.status = 400;
+      throw err;
+    }
+    p.executionHints = { ...p.executionHints, preScaleReplicas: r, scaleTargetReplicas: target };
   },
   dryRunPlan: (p) =>
-    `scale_deployment: ${requireDeployment(p)} replicas ${p.executionHints?.preScaleReplicas ?? '?'} → 1 (dry-run; no API mutation)`,
+    `scale_deployment: ${requireDeployment(p)} replicas ${p.executionHints?.preScaleReplicas ?? '?'} → ${p.executionHints?.scaleTargetReplicas ?? '?'} (dry-run; no API mutation)`,
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Scale Down', failureType: p.failureType };
-    if (p.dryRun) return ok('Dry-run: would scale down to 1');
+    if (p.dryRun) return ok('Dry-run: would partially scale down');
     const dep = requireDeployment(p);
+    const target = p.executionHints?.scaleTargetReplicas;
+    if (typeof target !== 'number') throw new Error('scale-down: missing target replicas');
     await snapshotReplicas(p, dep);
-    await scaleDeployment(p.target.namespace, dep, 1, ref, p.signal);
-    return ok('Scaled down to 1');
+    await scaleDeployment(p.target.namespace, dep, target, ref, p.signal);
+    return ok(`Scaled down to ${target} (partial degradation)`);
   },
   verifyApplied: async (p) => {
     const dep = requireDeployment(p);
     const cur = await readDeployment(p.target.namespace, dep, p.signal);
     const r = cur?.spec?.replicas;
-    if (r !== 1) throw new Error(`Post-verify: expected spec.replicas=1, got ${r}`);
+    const exp = p.executionHints?.scaleTargetReplicas;
+    if (exp != null && r !== exp) throw new Error(`Post-verify: expected spec.replicas=${exp}, got ${r}`);
   },
   rollback: async () => { },
 };
@@ -2360,7 +2419,7 @@ const ingressMisrouteRestartPods: FailureMethod = {
 // Resource pressure (production allowlist category)
 const resourcePressureReduceMemoryLimits: FailureMethod = {
   id: 'reduce-memory-limits',
-  title: 'Reduce memory limits (may trigger OOM; fully reversible from snapshot)',
+  title: 'Reduce memory limits (auto-inject baseline if missing; OOM pressure; snapshot rollback)',
   supports: 'resource_pressure',
   requirements: { requiresNamespace: true, requiresDeployment: true, requiresDuration: true },
   validate: async (p) => {
@@ -2375,23 +2434,41 @@ const resourcePressureReduceMemoryLimits: FailureMethod = {
     const cname = await resolveMainContainerName(p.target.namespace, dep);
     const lim =
       cur.spec?.template?.spec?.containers?.find((x: any) => x.name === cname)?.resources?.limits?.memory;
-    if (!lim) {
-      const err: any = new Error(
-        `Container "${cname}" has no memory limit — add a limit first so reduction is meaningful`
-      );
-      err.status = 400;
-      throw err;
-    }
-    p.executionHints = { ...p.executionHints, expectedMemoryLimit: '64Mi' };
+    p.executionHints = {
+      ...p.executionHints,
+      expectedMemoryLimit: '64Mi',
+      injectedBaselineResources: !lim,
+    };
   },
-  dryRunPlan: (p) =>
-    `patch_deployment: ${requireDeployment(p)} set resources.limits.memory=${p.executionHints?.expectedMemoryLimit ?? '64Mi'} (dry-run; no API mutation)`,
+  dryRunPlan: (p) => {
+    const inj = p.executionHints?.injectedBaselineResources ? `inject_limits(cpu=${BASELINE_LIMIT_CPU},memory=${BASELINE_LIMIT_MEM}) then ` : '';
+    return `${inj}patch_deployment: ${requireDeployment(p)} resources.limits.memory=64Mi (dry-run; no API mutation)`;
+  },
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Reduce Mem Limits', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch resources.limits.memory');
     const dep = requireDeployment(p);
     const cname = await resolveMainContainerName(p.target.namespace, dep);
     await snapshotDeployment(p, dep);
+    if (p.executionHints?.injectedBaselineResources) {
+      await patchDeploymentTemplate(p.target.namespace, dep, {
+        contentType: 'application/strategic-merge-patch+json',
+        body: {
+          spec: {
+            template: {
+              spec: {
+                containers: [
+                  {
+                    name: cname,
+                    resources: { limits: { cpu: BASELINE_LIMIT_CPU, memory: BASELINE_LIMIT_MEM } },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      }, { simulationId: p.simulationId, name: 'Inject baseline limits', failureType: p.failureType }, p.signal);
+    }
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: {
@@ -2404,7 +2481,7 @@ const resourcePressureReduceMemoryLimits: FailureMethod = {
         },
       },
     }, ref, p.signal);
-    return ok('Reduced memory limit to 64Mi');
+    return ok('Reduced memory limit to 64Mi' + (p.executionHints?.injectedBaselineResources ? ' (after baseline injection)' : ''));
   },
   verifyApplied: async (p) => {
     const dep = requireDeployment(p);
@@ -2418,7 +2495,7 @@ const resourcePressureReduceMemoryLimits: FailureMethod = {
 
 const resourcePressureUpdateCpuResources: FailureMethod = {
   id: 'update-cpu-resources',
-  title: 'Lower CPU limits (Kubernetes-native throttling; reversible)',
+  title: 'Lower CPU limits (auto-inject baseline if missing; throttling; snapshot rollback)',
   supports: 'resource_pressure',
   requirements: {
     requiresNamespace: true,
@@ -2445,18 +2522,17 @@ const resourcePressureUpdateCpuResources: FailureMethod = {
     const cname = await resolveMainContainerName(p.target.namespace, dep);
     const lim =
       cur.spec?.template?.spec?.containers?.find((x: any) => x.name === cname)?.resources?.limits?.cpu;
-    if (!lim) {
-      const err: any = new Error(
-        `Container "${cname}" has no cpu limit — add a CPU limit first so throttling is meaningful`
-      );
-      err.status = 400;
-      throw err;
-    }
     const mc = Math.max(20, Math.min(500, 550 - p.intensityPercent * 5));
-    p.executionHints = { ...p.executionHints, expectedCpuLimit: `${mc}m` };
+    p.executionHints = {
+      ...p.executionHints,
+      expectedCpuLimit: `${mc}m`,
+      injectedBaselineResources: !lim,
+    };
   },
-  dryRunPlan: (p) =>
-    `patch_deployment: ${requireDeployment(p)} set resources.limits.cpu=${p.executionHints?.expectedCpuLimit ?? '?'} (dry-run; no API mutation)`,
+  dryRunPlan: (p) => {
+    const inj = p.executionHints?.injectedBaselineResources ? `inject_limits(cpu=${BASELINE_LIMIT_CPU},memory=${BASELINE_LIMIT_MEM}) then ` : '';
+    return `${inj}patch_deployment: ${requireDeployment(p)} resources.limits.cpu=${p.executionHints?.expectedCpuLimit ?? '?'} (dry-run; no API mutation)`;
+  },
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Update CPU limits', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would patch resources.limits.cpu');
@@ -2466,6 +2542,25 @@ const resourcePressureUpdateCpuResources: FailureMethod = {
     const targetLimit = `${mc}m`;
     p.executionHints = { ...p.executionHints, expectedCpuLimit: targetLimit };
     await snapshotDeployment(p, dep);
+    if (p.executionHints?.injectedBaselineResources) {
+      await patchDeploymentTemplate(p.target.namespace, dep, {
+        contentType: 'application/strategic-merge-patch+json',
+        body: {
+          spec: {
+            template: {
+              spec: {
+                containers: [
+                  {
+                    name: cname,
+                    resources: { limits: { cpu: BASELINE_LIMIT_CPU, memory: BASELINE_LIMIT_MEM } },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      }, { simulationId: p.simulationId, name: 'Inject baseline limits', failureType: p.failureType }, p.signal);
+    }
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: {
@@ -2478,7 +2573,7 @@ const resourcePressureUpdateCpuResources: FailureMethod = {
         },
       },
     }, ref, p.signal);
-    return ok(`Set CPU limit to ${targetLimit}`);
+    return ok(`Set CPU limit to ${targetLimit}` + (p.executionHints?.injectedBaselineResources ? ' (after baseline injection)' : ''));
   },
   verifyApplied: async (p) => {
     const dep = requireDeployment(p);
@@ -2507,12 +2602,14 @@ const rolloutFailureRestartDeployment: FailureMethod = {
       throw err;
     }
     const gen = cur.metadata?.generation ?? 0;
-    const ann =
-      cur.spec?.template?.metadata?.annotations?.['kubectl.kubernetes.io/restartedAt'] ?? null;
+    const tplAnn = cur.spec?.template?.metadata?.annotations ?? {};
+    const ann = tplAnn['kubectl.kubernetes.io/restartedAt'] ?? null;
+    const annSimple = tplAnn.restartedAt ?? null;
     p.executionHints = {
       ...p.executionHints,
       preDeploymentGeneration: gen,
       preTemplateRestartAnnotation: ann,
+      preRestartedAtSimple: annSimple,
     };
   },
   dryRunPlan: (p) =>
@@ -2530,9 +2627,13 @@ const rolloutFailureRestartDeployment: FailureMethod = {
     const cur = await readDeployment(p.target.namespace, dep, p.signal);
     const gen = cur.metadata?.generation ?? 0;
     const pre = p.executionHints?.preDeploymentGeneration ?? -1;
-    const ann = cur.spec?.template?.metadata?.annotations?.['kubectl.kubernetes.io/restartedAt'];
-    if (gen <= pre && ann === p.executionHints?.preTemplateRestartAnnotation) {
-      throw new Error('Post-verify: deployment generation and restart annotation unchanged after rollout restart');
+    const anns = cur.spec?.template?.metadata?.annotations ?? {};
+    const annK = anns['kubectl.kubernetes.io/restartedAt'];
+    const annS = anns.restartedAt;
+    const preK = p.executionHints?.preTemplateRestartAnnotation;
+    const preS = p.executionHints?.preRestartedAtSimple;
+    if (gen <= pre && annK === preK && annS === preS) {
+      throw new Error('Post-verify: rollout restart did not change generation or restart annotations');
     }
   },
   rollback: async () => { },
@@ -2554,26 +2655,21 @@ const rolloutFailureInvalidCommand: FailureMethod = {
     }
   },
   dryRunPlan: (p) =>
-    `patch_deployment: ${requireDeployment(p)} set command=[sh,-c,exit 137] on primary container (dry-run; no API mutation)`,
+    `replace_deployment: ${requireDeployment(p)} set command=[sh,-c,exit 137] (full object replace; rollback=exact snapshot; dry-run; no API mutation)`,
   apply: async (p) => {
     const ref = { simulationId: p.simulationId, name: 'Invalid Command', failureType: p.failureType };
-    if (p.dryRun) return ok('Dry-run: would patch command to invalid');
+    if (p.dryRun) return ok('Dry-run: would replace deployment with failing command');
     const dep = requireDeployment(p);
     const cname = await resolveMainContainerName(p.target.namespace, dep);
     await snapshotDeployment(p, dep);
-    await patchDeploymentTemplate(p.target.namespace, dep, {
-      contentType: 'application/strategic-merge-patch+json',
-      body: {
-        spec: {
-          template: {
-            spec: {
-              containers: [{ name: cname, command: ['sh', '-c', 'exit 137'] }],
-            },
-          },
-        },
-      },
-    }, ref, p.signal);
-    return ok('Patched command to exit 137');
+    const live = await readDeployment(p.target.namespace, dep, p.signal);
+    const body = JSON.parse(JSON.stringify(live));
+    const containers = body?.spec?.template?.spec?.containers;
+    const cont = Array.isArray(containers) ? containers.find((x: any) => x.name === cname) : null;
+    if (!cont) throw new Error(`invalid-command: container "${cname}" not found in deployment template`);
+    cont.command = ['sh', '-c', 'exit 137'];
+    await replaceDeployment(p.target.namespace, dep, body, ref, p.signal);
+    return ok('Replaced deployment with failing command (recoverable via snapshot rollback / rollout revision)');
   },
   verifyApplied: async (p) => {
     const dep = requireDeployment(p);
@@ -2581,8 +2677,9 @@ const rolloutFailureInvalidCommand: FailureMethod = {
     const cur = await readDeployment(p.target.namespace, dep, p.signal);
     const cont = cur?.spec?.template?.spec?.containers?.find((x: any) => x.name === cname);
     const cmd = cont?.command;
-    if (!Array.isArray(cmd) || cmd.join(' ') !== 'sh -c exit 137') {
-      throw new Error(`Post-verify: expected command exit 137, got ${JSON.stringify(cmd)}`);
+    const cmdStr = Array.isArray(cmd) ? cmd.join(' ') : '';
+    if (!cmdStr.includes('exit 137')) {
+      throw new Error(`Post-verify: expected failing command with exit 137, got ${JSON.stringify(cmd)}`);
     }
   },
   rollback: async () => { },

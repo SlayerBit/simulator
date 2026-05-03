@@ -20,10 +20,14 @@ export interface FailureParams {
     scaleTargetReplicas?: number;
     preDeploymentGeneration?: number;
     preTemplateRestartAnnotation?: string | null;
+    preRestartedAtSimple?: string | null;
     expectedMemoryLimit?: string;
     expectedCpuLimit?: string;
     networkPolicyName?: string;
     applyDeletedCount?: number;
+    disruptionIntervalSec?: number;
+    disruptionCycles?: number;
+    injectedBaselineResources?: boolean;
   };
 }
 
@@ -65,4 +69,9 @@ export interface FailureMethod {
   verifyApplied?: (params: FailureParams) => Promise<void>;
   /** Description of planned actions for dry-run logs (after validate). */
   dryRunPlan?: (params: FailureParams) => Promise<string> | string;
+  /**
+   * When true, apply() already holds the cluster in the failure state for the full
+   * simulation duration — skip the post-apply sleep before rollback.
+   */
+  consumesSimulationDurationInApply?: boolean;
 }

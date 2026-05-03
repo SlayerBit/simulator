@@ -127,6 +127,16 @@ export async function runSimulation(simulationId: string): Promise<void> {
   const sim = await prisma.simulation.findUnique({ where: { id: simulationId } });
   if (!sim) throw new Error('Simulation disappeared during claim');
 
+  await recordSimulationStep({
+    simulationId,
+    name: 'simulation_started',
+    failureType: sim.failureType,
+    stepType: 'execution',
+    phase: 'pre-flight',
+    status: 'success',
+    message: `simulation_started id=${simulationId}`,
+  });
+
   console.log(`[Simulator:${simulationId}] Starting simulation: ${simulationId} (type: ${sim.failureType})`);
   const rollback = new RollbackStack();
   const activeRun = registerActiveRun(simulationId);
@@ -340,12 +350,12 @@ export async function runSimulation(simulationId: string): Promise<void> {
     console.log(`[Simulator:${simulationId}] [Lifecycle] Apply start`);
     await recordSimulationStep({
       simulationId,
-      name: 'Failure Injection Start',
+      name: 'apply_started',
       failureType: sim.failureType,
       stepType: 'execution',
       phase: 'chaos',
       status: 'running',
-      message: `Applying failure method "${methodId}"`,
+      message: `apply_started method="${methodId}"`,
     });
 
     let applyResult;
@@ -354,7 +364,7 @@ export async function runSimulation(simulationId: string): Promise<void> {
       console.log(`[Simulator:${simulationId}] [Lifecycle] Apply success — ${applyResult.message}`);
       await recordSimulationStep({
         simulationId,
-        name: 'Failure Injection Complete',
+        name: 'apply_step_completed',
         failureType: sim.failureType,
         stepType: 'execution',
         phase: 'chaos',
@@ -403,7 +413,7 @@ export async function runSimulation(simulationId: string): Promise<void> {
       console.error(`[Simulator:${simulationId}] [Lifecycle] Apply FAILED: ${applyErr.message}`);
       await recordSimulationStep({
         simulationId,
-        name: 'Failure Injection Error',
+        name: 'apply_step_failed',
         failureType: sim.failureType,
         stepType: 'execution',
         phase: 'chaos',
@@ -432,14 +442,15 @@ export async function runSimulation(simulationId: string): Promise<void> {
       return;
     }
 
-    // Wait for duration, then rollback.
-    await sleepOrAbort(sim.durationSeconds * 1000);
+    // Hold chaos for the configured window unless apply() already ran the full duration (e.g. disruption loop).
+    const holdMs = failureMethod.consumesSimulationDurationInApply ? 0 : sim.durationSeconds * 1000;
+    await sleepOrAbort(holdMs);
 
     // --- Phase: recovery — automatic rollback ---
     console.log(`[Simulator:${simulationId}] [Lifecycle] Automatic rollback start (${rollback.size} entries)`);
     await recordSimulationStep({
       simulationId,
-      name: 'Rollback Start',
+      name: 'rollback_started',
       failureType: sim.failureType,
       stepType: 'rollback',
       phase: 'recovery',
@@ -457,7 +468,7 @@ export async function runSimulation(simulationId: string): Promise<void> {
     console.log(`[Simulator:${simulationId}] [Lifecycle] Rollback ${rb.ok ? 'SUCCEEDED' : 'FAILED'} in ${recoverySeconds}s`);
     await recordSimulationStep({
       simulationId,
-      name: rb.ok ? 'Rollback Complete' : 'Rollback Partial/Failed',
+      name: rb.ok ? 'rollback_completed' : 'rollback_failed',
       failureType: sim.failureType,
       stepType: 'rollback',
       phase: 'recovery',
@@ -496,6 +507,17 @@ export async function runSimulation(simulationId: string): Promise<void> {
     });
   } catch (e: any) {
     const wasCancelled = e?.name === 'AbortError' || String(e?.message ?? '').toLowerCase().includes('cancel');
+    if (wasCancelled && !sim.dryRun) {
+      await recordSimulationStep({
+        simulationId,
+        name: 'stop_completed',
+        failureType: sim.failureType,
+        stepType: 'execution',
+        phase: 'recovery',
+        status: 'running',
+        message: 'stop_completed — executing rollback',
+      });
+    }
 
     // FIX-4: Manual rollback error path. If K8s was partially mutated (rollback.size > 0),
     // set state to failure_active so the user can invoke manual rollback. If nothing was
@@ -657,6 +679,15 @@ export async function stopSimulation(simulationId: string, stoppedBy: UserIdenti
     err.status = 409;
     throw err;
   }
+
+  await recordSimulationStep({
+    simulationId,
+    name: 'stop_requested',
+    failureType: sim.failureType,
+    stepType: 'execution',
+    status: 'running',
+    message: `stop_requested by=${stoppedBy.id}`,
+  });
 
   const active = getActiveRun(simulationId);
   if (active) {

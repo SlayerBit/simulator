@@ -333,7 +333,7 @@ export async function deletePodsBySelector(
   }
 }
 
-/** Triggers a rolling restart by bumping the standard kubectl restartedAt annotation. */
+/** Triggers a rolling restart via merge-patch on pod template annotations (avoids broken strategic patches). */
 export async function rolloutRestartDeployment(
   namespace: string,
   deploymentName: string,
@@ -346,19 +346,23 @@ export async function rolloutRestartDeployment(
   const annotations = {
     ...existing,
     'kubectl.kubernetes.io/restartedAt': now,
+    restartedAt: now,
   };
   await patchDeploymentTemplate(
     namespace,
     deploymentName,
-    strategicMergePatch({
-      spec: {
-        template: {
-          metadata: {
-            annotations,
+    {
+      contentType: 'application/merge-patch+json',
+      body: {
+        spec: {
+          template: {
+            metadata: {
+              annotations,
+            },
           },
         },
       },
-    }),
+    },
     ref,
     signal
   );
@@ -573,6 +577,10 @@ export async function replaceNetworkPolicy(
   }
 }
 
+function k8sHttpStatus(err: any): number {
+  return Number(err?.statusCode ?? err?.response?.statusCode ?? err?.body?.code ?? err?.body?.status ?? 0);
+}
+
 export async function upsertNetworkPolicy(
   namespace: string,
   policyName: string,
@@ -585,10 +593,8 @@ export async function upsertNetworkPolicy(
   const start = Date.now();
   const netApi = net as any;
 
-  /** Strip cluster-managed fields from any body before a PUT (replace) request.
-   *  Missing resourceVersion is acceptable — the API server will reject stale ones anyway.
-   *  ISSUE-017: applied here to prevent 409/422 on NetworkPolicy replace inside upsert. */
-  function cleanForReplace(src: any): any {
+  /** Strip cluster-managed fields before create/replace (never send stale resourceVersion). */
+  function cleanForSubmit(src: any): any {
     const body = JSON.parse(JSON.stringify(src));
     if (!body.metadata) body.metadata = {};
     const m = body.metadata;
@@ -604,41 +610,24 @@ export async function upsertNetworkPolicy(
   }
 
   try {
-    // ISSUE-016: Split read and replace into separate try/catch blocks so that
-    // non-404 errors from each operation are surfaced independently and never swallowed.
-    let existingPolicy: any | null = null;
+    const body = cleanForSubmit(spec);
+    // Production order: CREATE first (avoids replace-on-missing 404), then REPLACE on conflict.
     try {
-      const res: any = await withTimeout(netApi.readNamespacedNetworkPolicy({
-        name: policyName,
-        namespace: ns
-      }), DEFAULT_TIMEOUT_MS, signal);
-      // Match readNetworkPolicy: normalized object, undefined status tolerated the same way.
-      existingPolicy = res?.body ?? res ?? null;
-    } catch (readErr: any) {
-      const readStatus = readErr?.statusCode ?? readErr?.response?.statusCode ?? readErr?.body?.code;
-      if (readStatus !== 404) {
-        // Non-404 read error (permissions, network, etc.) — do NOT swallow.
-        throw readErr;
-      }
-      // 404: policy does not exist, fall through to create.
-      existingPolicy = null;
-    }
-
-    if (existingPolicy != null) {
-      // Policy exists — replace it. ISSUE-017: strip cluster fields.
-      const replaceBody = cleanForReplace(spec);
-      await withTimeout(netApi.replaceNamespacedNetworkPolicy({
-        name: policyName,
-        namespace: ns,
-        body: replaceBody
-      }), DEFAULT_TIMEOUT_MS, signal);
-    } else {
-      // Policy does not exist — create it (strip cluster metadata like replace path).
-      const createBody = cleanForReplace(spec);
       await withTimeout(netApi.createNamespacedNetworkPolicy({
         namespace: ns,
-        body: createBody
+        body,
       }), DEFAULT_TIMEOUT_MS, signal);
+    } catch (createErr: any) {
+      const cst = k8sHttpStatus(createErr);
+      if (cst === 409 || cst === 422) {
+        await withTimeout(netApi.replaceNamespacedNetworkPolicy({
+          name: policyName,
+          namespace: ns,
+          body,
+        }), DEFAULT_TIMEOUT_MS, signal);
+      } else {
+        throw createErr;
+      }
     }
 
     if (ref) {
@@ -649,7 +638,7 @@ export async function upsertNetworkPolicy(
         stepType: 'execution',
         status: 'success',
         command: `kubectl apply -f [network policy config] -n ${ns}`,
-        message: `Upserted NetworkPolicy ${policyName}`,
+        message: `Upserted NetworkPolicy ${policyName} (create-or-replace)`,
         resourceType: 'NetworkPolicy',
         resourceName: policyName,
         namespace: ns,

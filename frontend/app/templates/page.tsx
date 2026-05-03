@@ -24,8 +24,8 @@ const VISIBLE_FAILURE_TYPES = [
 
 const METHODS_BY_FAILURE: Record<(typeof VISIBLE_FAILURE_TYPES)[number], { id: string; label: string }[]> = {
   pod_crash: [
-    { id: 'delete-pods', label: 'Delete pods' },
-    { id: 'restart-pods', label: 'Restart pods' },
+    { id: 'delete-pods', label: 'Delete pods (sustained loop)' },
+    { id: 'restart-pods', label: 'Crash-loop (readiness fails)' },
   ],
   service_unavailability: [
     { id: 'scale-to-zero', label: 'Scale to zero' },
