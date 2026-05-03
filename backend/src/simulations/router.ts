@@ -5,6 +5,7 @@ import { authMiddleware, type RequestWithUser } from '../auth/service.js';
 import { getPrismaClient } from '../database/client.js';
 import type { FailureType } from '../types/domain.js';
 import { createSimulationName, createSimulationRecord, runSimulation, stopSimulation, rollbackSimulation } from './service.js';
+import { assertVisibleFailureMethod } from '../failures/allowlist.js';
 
 export const simulationsRouter = Router();
 
@@ -39,6 +40,7 @@ simulationsRouter.post('/', authMiddleware(['admin', 'engineer']), async (req: R
   const config = await import('../config/env.js').then(m => m.loadConfig());
 
   const name = parsed.data.name ?? createSimulationName();
+  assertVisibleFailureMethod(parsed.data.failureType, parsed.data.method);
   const sim = await createSimulationRecord(user, {
     ...parsed.data,
     name,
@@ -55,7 +57,7 @@ simulationsRouter.post('/', authMiddleware(['admin', 'engineer']), async (req: R
           data: { state: 'failed', completedAt: new Date() }
         });
       }
-    } catch {}
+    } catch { }
     await prisma.auditLog.create({
       data: {
         userId: user.id,
@@ -97,8 +99,8 @@ simulationsRouter.post('/:id/rollback', authMiddleware(['admin', 'engineer']), a
 
 // GET /api/simulations/meta
 simulationsRouter.get('/meta', authMiddleware(['admin', 'engineer', 'viewer']), async (req: Request, res: Response) => {
-  const { getFailureMethods } = await import('../failures/registry.js');
-  const methods = getFailureMethods().map(m => ({
+  const { getVisibleFailureMethods } = await import('../failures/registry.js');
+  const methods = getVisibleFailureMethods().map(m => ({
     id: m.id,
     title: m.title,
     supports: m.supports,
@@ -111,7 +113,7 @@ simulationsRouter.get('/meta', authMiddleware(['admin', 'engineer', 'viewer']), 
 simulationsRouter.get('/', authMiddleware(['admin', 'engineer', 'viewer']), async (req: Request, res: Response) => {
   const prisma = getPrismaClient();
   const user = (req as RequestWithUser).user!;
-  
+
   const page = Math.max(1, parseInt(String(req.query.page || '1'), 10));
   const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '50'), 10)));
   const skip = (page - 1) * limit;
@@ -124,16 +126,16 @@ simulationsRouter.get('/', authMiddleware(['admin', 'engineer', 'viewer']), asyn
       };
 
   const [sims, total] = await Promise.all([
-    prisma.simulation.findMany({ 
-      where, 
-      orderBy: { createdAt: 'desc' }, 
-      skip, 
-      take: limit 
+    prisma.simulation.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take: limit
     }),
     prisma.simulation.count({ where })
   ]);
 
-  return res.json({ 
+  return res.json({
     simulations: sims,
     pagination: {
       total,
@@ -179,40 +181,66 @@ simulationsRouter.post('/:id/retry', authMiddleware(['admin', 'engineer']), asyn
   const prisma = getPrismaClient();
   const id = String(req.params.id);
   const user = (req as RequestWithUser).user!;
-  const sim = await prisma.simulation.findUnique({ where: { id } });
-  if (!sim) return res.status(404).json({ error: { message: 'Not found' } });
-  if (user.role !== 'admin' && sim.createdById !== user.id) return res.status(403).json({ error: { message: 'Forbidden' } });
 
-  // Fetch original failure event so we clone the method name.
-  const origEvent = await prisma.failureEvent.findFirst({ where: { simulationId: id } });
+  // ISSUE-013: Wrap the terminal-state check and new simulation creation in a single
+  // transaction so concurrent retry requests cannot both pass the guard and create
+  // duplicate simulations for the same original simulation.
+  let newSim: any = null;
+  try {
+    newSim = await prisma.$transaction(async (tx: typeof prisma) => {
+      const sim = await tx.simulation.findUnique({ where: { id } });
+      if (!sim) {
+        const e: any = new Error('Not found'); e.status = 404; throw e;
+      }
+      if (user.role !== 'admin' && sim.createdById !== user.id) {
+        const e: any = new Error('Forbidden'); e.status = 403; throw e;
+      }
+      if (!['completed', 'failed', 'cancelled', 'rolled_back', 'rollback_failed'].includes(sim.state)) {
+        const e: any = new Error('Simulation is still active and cannot be retried'); e.status = 409; throw e;
+      }
+      if (sim.isRollbackable) {
+        const e: any = new Error('Simulation still has pending rollback actions and cannot be retried yet'); e.status = 409; throw e;
+      }
 
-  const newSim = await prisma.simulation.create({
-    data: {
-      name: `${sim.name}-retry`,
-      failureType: sim.failureType,
-      state: 'pending',
-      namespace: sim.namespace,
-      targetService: sim.targetService ?? null,
-      targetDeployment: sim.targetDeployment ?? null,
-      targetPod: sim.targetPod ?? null,
-      labelSelector: sim.labelSelector ?? null,
-      intensity: sim.intensity ?? null,
-      durationSeconds: sim.durationSeconds,
-      dryRun: sim.dryRun,
-      // BUG-08 fix: Copy manualRollback from original simulation.
-      manualRollback: sim.manualRollback,
-      createdById: user.id,
-    },
-  });
+      // Fetch original failure event so we clone the method name.
+      const origEvent = await tx.failureEvent.findFirst({ where: { simulationId: id } });
 
-  // Clone the FailureEvent so runSimulation can find the method id.
-  await prisma.failureEvent.create({
-    data: {
-      simulationId: newSim.id,
-      method: origEvent?.method ?? 'delete-pods',
-      state: 'pending',
-    },
-  });
+      const created = await tx.simulation.create({
+        data: {
+          name: `${sim.name}-retry`,
+          failureType: sim.failureType,
+          state: 'pending',
+          namespace: sim.namespace,
+          targetService: sim.targetService ?? null,
+          targetDeployment: sim.targetDeployment ?? null,
+          targetPod: sim.targetPod ?? null,
+          labelSelector: sim.labelSelector ?? null,
+          intensity: sim.intensity ?? null,
+          durationSeconds: sim.durationSeconds,
+          dryRun: sim.dryRun,
+          manualRollback: sim.manualRollback,
+          createdById: user.id,
+        },
+      });
+
+      // Clone the FailureEvent so runSimulation can find the method id.
+      await tx.failureEvent.create({
+        data: {
+          simulationId: created.id,
+          method: origEvent?.method ?? 'delete-pods',
+          state: 'pending',
+        },
+      });
+
+      return created;
+    });
+  } catch (e: any) {
+    const status = e?.status ?? 500;
+    if (status === 404) return res.status(404).json({ error: { message: 'Not found' } });
+    if (status === 403) return res.status(403).json({ error: { message: 'Forbidden' } });
+    if (status === 409) return res.status(409).json({ error: { message: e.message } });
+    throw e;
+  }
 
   void runSimulation(newSim.id);
   return res.status(201).json({ simulation: newSim });

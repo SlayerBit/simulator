@@ -9,6 +9,7 @@ import { loadConfig } from '../config/env.js';
 import { replaceDeployment, scaleDeployment, replaceNetworkPolicy, deleteNetworkPolicy } from '../kubernetes/ops.js';
 import { clearSimStepCounter, recordSimulationStep } from './steps.js';
 import { normalizeAndSaveParameters } from './normalization.js';
+import { assertVisibleFailureMethod } from '../failures/allowlist.js';
 
 export interface CreateSimulationInput {
   name: string;
@@ -31,10 +32,10 @@ export async function createSimulationRecord(user: UserIdentity, input: CreateSi
   const intensityLabel = input.latencyMs != null
     ? `${input.latencyMs}ms`
     : input.packetLossPercent != null
-    ? `${input.packetLossPercent}%`
-    : input.intensityPercent != null
-    ? String(input.intensityPercent)
-    : null;
+      ? `${input.packetLossPercent}%`
+      : input.intensityPercent != null
+        ? String(input.intensityPercent)
+        : null;
 
   const sim = await prisma.simulation.create({
     data: {
@@ -138,9 +139,23 @@ export async function runSimulation(simulationId: string): Promise<void> {
   let methodId = 'unknown';
 
   try {
+    // FIX-1: Window check is INSIDE try so finally always runs for audit+recoveryAction cleanup.
+    // Throwing an AbortError here is caught below, sets wasCancelled=true, and the finally
+    // block writes the recoveryAction and simulation.ended audit log regardless.
+    {
+      const freshCheck = await prisma.simulation.findUnique({ where: { id: simulationId }, select: { state: true } });
+      if (freshCheck?.state === 'cancelled') {
+        console.log(`[Simulator:${simulationId}] [Claim] Simulation was cancelled during startup window — aborting.`);
+        const abortErr: any = new Error('Cancelled');
+        abortErr.name = 'AbortError';
+        throw abortErr;
+      }
+    }
+
     const ev = await prisma.failureEvent.findFirst({ where: { simulationId } });
     methodId = ev?.method ?? 'unknown';
 
+    assertVisibleFailureMethod(sim.failureType, methodId);
     const failureMethod = findFailureMethod(sim.failureType as FailureType, methodId);
 
     const target: any = { namespace: sim.namespace || 'default' };
@@ -210,18 +225,25 @@ export async function runSimulation(simulationId: string): Promise<void> {
     console.log(`[Simulator:${simulationId}] [Lifecycle] Validation start`);
     await recordSimulationStep({
       simulationId,
-      name: 'Validation',
+      name: 'validation_started',
       failureType: sim.failureType,
       stepType: 'validation',
       phase: 'pre-flight',
       status: 'running',
-      message: `Validating method "${methodId}" requirements`,
+      message: `validation_started method=${methodId}`,
     });
-
     try {
       await failureMethod.validate(params);
       console.log(`[Simulator:${simulationId}] [Lifecycle] Validation passed`);
-      // Note: validate() itself also records a success step — so we don't double-log here.
+      await recordSimulationStep({
+        simulationId,
+        name: 'validation_passed',
+        failureType: sim.failureType,
+        stepType: 'validation',
+        phase: 'pre-flight',
+        status: 'success',
+        message: 'validation_passed',
+      });
     } catch (valErr: any) {
       console.error(`[Simulator:${simulationId}] [Lifecycle] Validation FAILED: ${valErr.message}`);
       await recordSimulationStep({
@@ -240,12 +262,26 @@ export async function runSimulation(simulationId: string): Promise<void> {
     if (sim.dryRun) {
       await recordSimulationStep({
         simulationId,
-        name: 'Dry-run Complete',
+        name: 'dry_run_started',
+        failureType: sim.failureType,
+        stepType: 'execution',
+        phase: 'pre-flight',
+        status: 'running',
+        message: 'dry_run_started',
+      });
+      let planMsg = 'Dry-run: validation only; no Kubernetes mutations.';
+      if (failureMethod.dryRunPlan) {
+        const r = failureMethod.dryRunPlan(params);
+        planMsg = typeof r === 'string' ? r : await r;
+      }
+      await recordSimulationStep({
+        simulationId,
+        name: 'dry_run_completed',
         failureType: sim.failureType,
         stepType: 'execution',
         phase: 'pre-flight',
         status: 'success',
-        message: 'Dry-run mode: no real mutations performed',
+        message: planMsg,
       });
 
       await prisma.failureEvent.updateMany({
@@ -325,6 +361,44 @@ export async function runSimulation(simulationId: string): Promise<void> {
         status: 'success',
         message: applyResult.message,
       });
+      if (failureMethod.verifyApplied) {
+        const vStart = Date.now();
+        await recordSimulationStep({
+          simulationId,
+          name: 'apply_verification_started',
+          failureType: sim.failureType,
+          stepType: 'execution',
+          phase: 'chaos',
+          status: 'running',
+          message: 'Post-apply cluster verification',
+        });
+        try {
+          await failureMethod.verifyApplied(params);
+          await recordSimulationStep({
+            simulationId,
+            name: 'apply_verification_passed',
+            failureType: sim.failureType,
+            stepType: 'execution',
+            phase: 'chaos',
+            status: 'success',
+            message: 'Cluster state matches expected failure impact',
+            durationMs: Date.now() - vStart,
+          });
+        } catch (verErr: any) {
+          await recordSimulationStep({
+            simulationId,
+            name: 'apply_verification_failed',
+            failureType: sim.failureType,
+            stepType: 'execution',
+            phase: 'chaos',
+            status: 'failed',
+            error: verErr.message,
+            message: 'Post-apply verification did not observe expected impact',
+            durationMs: Date.now() - vStart,
+          });
+          throw verErr;
+        }
+      }
     } catch (applyErr: any) {
       console.error(`[Simulator:${simulationId}] [Lifecycle] Apply FAILED: ${applyErr.message}`);
       await recordSimulationStep({
@@ -347,6 +421,14 @@ export async function runSimulation(simulationId: string): Promise<void> {
 
     if (sim.manualRollback) {
       console.log(`[Simulator:${simulationId}] Simulation ${simulationId} is Manual Recovery mode. Skipping automatic rollback.`);
+      await prisma.failureEvent.updateMany({
+        where: { simulationId },
+        data: { state: 'completed', endedAt: new Date() }
+      });
+      await prisma.simulation.update({
+        where: { id: simulationId },
+        data: { state: 'failure_active', completedAt: null }
+      });
       return;
     }
 
@@ -366,7 +448,8 @@ export async function runSimulation(simulationId: string): Promise<void> {
     });
 
     const recoveryStart = Date.now();
-    const rb = await rollback.rollbackAll(sim.id, sim.failureType, signal);
+    const rollbackController = new AbortController();
+    const rb = await rollback.rollbackAll(sim.id, sim.failureType, rollbackController.signal);
     rollbackSucceeded = rb.ok;
     const recoverySeconds = Math.max(0, Math.round((Date.now() - recoveryStart) / 1000));
     const rbErrors = rb.errors.join('; ');
@@ -413,49 +496,94 @@ export async function runSimulation(simulationId: string): Promise<void> {
     });
   } catch (e: any) {
     const wasCancelled = e?.name === 'AbortError' || String(e?.message ?? '').toLowerCase().includes('cancel');
-    const recoveryStart = Date.now();
-    let recoverySeconds = 0;
 
+    // FIX-4: Manual rollback error path. If K8s was partially mutated (rollback.size > 0),
+    // set state to failure_active so the user can invoke manual rollback. If nothing was
+    // applied yet, set to failed (or cancelled). Never leave stuck in 'running'.
     if (sim.manualRollback) {
-      console.log(`[Simulator:${simulationId}] Simulation FAILED, but Manual Recovery is enabled. Skipping automatic rollback.`);
+      rollbackSucceeded = null;
+      // failure_active only when K8s mutations already exist and need reverting.
+      const manualErrState: ExperimentState = rollback.size > 0
+        ? ('failure_active' as ExperimentState)
+        : (wasCancelled ? 'cancelled' : 'failed');
+
       if (rollback.size > 0) {
         await prisma.simulation.update({
           where: { id: simulationId },
-          data: { isRollbackable: true }
+          data: { isRollbackable: true },
         });
       }
-      rollbackSucceeded = null; // no rollback attempted
-    } else {
-      console.log(`[Simulator:${simulationId}] [Lifecycle] Error rollback start (${rollback.size} entries)`);
-      await recordSimulationStep({
-        simulationId,
-        name: 'Rollback Start (Error Path)',
-        failureType: sim.failureType,
-        stepType: 'rollback',
-        phase: 'recovery',
-        status: 'running',
-        message: `Starting rollback after error: ${e.message}`,
+
+      await prisma.failureEvent.updateMany({
+        where: { simulationId },
+        data: { state: wasCancelled ? 'rolled_back' : 'failed', endedAt: new Date(), errorMessage: e.message },
       });
-
-      const rb = await rollback.rollbackAll(sim.id, sim.failureType, signal);
-      rollbackSucceeded = rb.ok;
-      recoverySeconds = Math.max(0, Math.round((Date.now() - recoveryStart) / 1000));
-      const rbErrors = rb.errors.join('; ');
-
-      await recordSimulationStep({
-        simulationId,
-        name: rb.ok ? 'Error-path Rollback Complete' : 'Error-path Rollback Failed',
-        failureType: sim.failureType,
-        stepType: 'rollback',
-        phase: 'recovery',
-        status: rb.ok ? 'success' : 'failed',
-        durationMs: Date.now() - recoveryStart,
-        message: rb.ok ? 'Rollback after error completed' : `Rollback errored: ${rbErrors}`,
-        error: rbErrors || null,
+      await prisma.simulation.update({
+        where: { id: simulationId },
+        data: {
+          state: manualErrState,
+          // failure_active has no completedAt — completion is deferred to manual rollback.
+          completedAt: manualErrState === ('failure_active' as ExperimentState) ? null : new Date(),
+        },
       });
-
-      e.message = `${e?.message ?? String(e)}; rollback: ${rbErrors}`;
+      await prisma.report.create({
+        data: {
+          simulationId,
+          summary: manualErrState === ('failure_active' as ExperimentState)
+            ? 'Simulation partially applied — manual rollback required'
+            : (wasCancelled ? 'Simulation cancelled' : 'Simulation failed before applying'),
+          result: wasCancelled ? 'cancelled' : 'failed',
+          failureType: sim.failureType,
+          method: methodId,
+          namespace: sim.namespace,
+          targetService: sim.targetService ?? null,
+          intensity: sim.intensity ?? null,
+          durationSeconds: sim.durationSeconds,
+          startedAt: sim.startedAt ?? new Date(),
+          endedAt: new Date(),
+          recoveryTimeSeconds: 0,
+          errors: e.message,
+        } as any,
+      });
+      console.error(`[Simulator:${simulationId}] Manual-mode simulation error (state=${manualErrState}):`, e);
+      // Do NOT throw — sim is in a stable state. finally still runs for audit+recoveryAction.
+      return;
     }
+
+    // Non-manual path: automatic error rollback.
+    const recoveryStart = Date.now();
+    let recoverySeconds = 0;
+
+    console.log(`[Simulator:${simulationId}] [Lifecycle] Error rollback start (${rollback.size} entries)`);
+    await recordSimulationStep({
+      simulationId,
+      name: 'Rollback Start (Error Path)',
+      failureType: sim.failureType,
+      stepType: 'rollback',
+      phase: 'recovery',
+      status: 'running',
+      message: `Starting rollback after error: ${e.message}`,
+    });
+
+    const rollbackController = new AbortController();
+    const rb = await rollback.rollbackAll(sim.id, sim.failureType, rollbackController.signal);
+    rollbackSucceeded = rb.ok;
+    recoverySeconds = Math.max(0, Math.round((Date.now() - recoveryStart) / 1000));
+    const rbErrors = rb.errors.join('; ');
+
+    await recordSimulationStep({
+      simulationId,
+      name: rb.ok ? 'Error-path Rollback Complete' : 'Error-path Rollback Failed',
+      failureType: sim.failureType,
+      stepType: 'rollback',
+      phase: 'recovery',
+      status: rb.ok ? 'success' : 'failed',
+      durationMs: Date.now() - recoveryStart,
+      message: rb.ok ? 'Rollback after error completed' : `Rollback errored: ${rbErrors}`,
+      error: rbErrors || null,
+    });
+
+    e.message = `${e?.message ?? String(e)}; rollback: ${rbErrors}`;
 
     await prisma.failureEvent.updateMany({
       where: { simulationId },
@@ -489,13 +617,13 @@ export async function runSimulation(simulationId: string): Promise<void> {
     console.error(`[Simulator:${simulationId}] Simulation ${simulationId} FAILED:`, e);
     throw e;
   } finally {
-    if (!sim.dryRun) {
+    endActiveRun(simulationId);
+    clearSimStepCounter(simulationId);
+    if (!sim.dryRun && !sim.manualRollback) {
       await prisma.recoveryAction.create({
         data: {
           simulationId,
-          description: sim.manualRollback
-            ? 'Manual rollback mode — awaiting user-initiated recovery'
-            : 'Automatic rollback executed',
+          description: 'Automatic rollback executed',
           success: rollbackSucceeded ?? false,
           completedAt: new Date(),
         },
@@ -509,8 +637,6 @@ export async function runSimulation(simulationId: string): Promise<void> {
         metadata: { durationSeconds: Math.round((Date.now() - startedAtMs) / 1000) },
       },
     });
-    endActiveRun(simulationId);
-    clearSimStepCounter(simulationId);
   }
 }
 
@@ -524,16 +650,34 @@ export async function stopSimulation(simulationId: string, stoppedBy: UserIdenti
     err.status = 409;
     throw err;
   }
+  // FIX-2: failure_active means K8s mutations are live and awaiting manual rollback.
+  // Stopping without rollback would leave the cluster permanently mutated.
+  if (sim.state === 'failure_active') {
+    const err: any = new Error("Simulation has active failures — use the '/rollback' endpoint to restore cluster state before cancelling");
+    err.status = 409;
+    throw err;
+  }
 
   const active = getActiveRun(simulationId);
   if (active) {
+    // ISSUE-006: Abort the active execution. The runSimulation catch block will
+    // perform rollback and write the terminal state — do not race it with a DB update here.
     active.controller.abort();
+  } else {
+    // ISSUE-006: No active run found — sim may be pending/queued or in the narrow
+    // window between claim and registerActiveRun. Use updateMany with a state guard
+    // so we never overwrite a terminal state that runSimulation may have just written.
+    const updated = await prisma.simulation.updateMany({
+      where: {
+        id: simulationId,
+        state: { notIn: ['completed', 'failed', 'rolled_back', 'cancelled'] as any },
+      },
+      data: { state: 'cancelled', completedAt: new Date() },
+    });
+    if (updated.count === 0) {
+      console.log(`[Simulator:${simulationId}] [Stop] State already terminal — skipping cancel update`);
+    }
   }
-
-  await prisma.simulation.update({
-    where: { id: simulationId },
-    data: { state: 'cancelled', completedAt: new Date() },
-  });
 
   await prisma.auditLog.create({
     data: {
@@ -587,7 +731,33 @@ export async function rollbackSimulation(simulationId: string, user: UserIdentit
   });
 
   if (!sim) throw new Error('Simulation not found');
+
+  // ISSUE-005: Guard valid states for manual rollback. Only failure_active sims (or sims
+  // that completed apply but are awaiting manual recovery) may be rolled back this way.
+  const rollbackableStates = ['failure_active', 'failed'];
+  if (!rollbackableStates.includes(sim.state)) {
+    const err: any = new Error(`Cannot manually roll back a simulation in state '${sim.state}'. Allowed states: ${rollbackableStates.join(', ')}`);
+    err.status = 409;
+    throw err;
+  }
+
   if (!sim.isRollbackable) throw new Error('No pending rollback actions for this simulation');
+
+  // FIX-3: Atomic claim — prevents two concurrent POST /rollback requests from both
+  // proceeding. updateMany returns count=0 if another request already cleared isRollbackable.
+  const rollbackClaim = await prisma.simulation.updateMany({
+    where: {
+      id: simulationId,
+      isRollbackable: true,
+      state: { in: rollbackableStates as any },
+    },
+    data: { isRollbackable: false },
+  });
+  if (rollbackClaim.count === 0) {
+    const err: any = new Error('Rollback already in progress or no pending rollback actions remain');
+    err.status = 409;
+    throw err;
+  }
 
   console.log(`[Simulator:${sim.id}] [Rollback] Manually rolling back simulation by user ${user.id}`);
 
@@ -638,7 +808,16 @@ export async function rollbackSimulation(simulationId: string, user: UserIdentit
           await deleteNetworkPolicy(entry.namespace!, entry.resourceName!);
         }
       } else if (entry.actionName === 'cleanup-tc-qdisc') {
-        console.log(`[Simulator:${sim.id}] [Rollback] TC cleanup skipped at manual rollback (pods may have been replaced).`);
+        const snap = data as { selector: string; container: string };
+        const { listPodsBySelector, execCommandInPod } = await import('../kubernetes/ops.js');
+        const pods = await listPodsBySelector(entry.namespace!, snap.selector);
+        for (const pod of pods) {
+          if (pod.metadata?.name) {
+            await execCommandInPod(entry.namespace!, pod.metadata.name, snap.container || '',
+              ['sh', '-c', 'tc qdisc del dev eth0 root 2>/dev/null || true']
+            );
+          }
+        }
       }
 
       await prisma.rollbackEntry.update({
@@ -680,7 +859,10 @@ export async function rollbackSimulation(simulationId: string, user: UserIdentit
     }
   }
 
-  const finalState = errors.length === 0 ? 'completed' : 'failed';
+  // ISSUE-005: Use 'rolled_back' for partial failure, not 'failed'. 'failed' implies the
+  // simulation itself failed to execute. 'rolled_back' is the correct terminal state after
+  // rollback (even partial). Keep isRollbackable=true only if there are still pending entries.
+  const finalState: ExperimentState = errors.length === 0 ? 'completed' : ('rolled_back' as ExperimentState);
   const rollbackDurationMs = Date.now() - rollbackStartMs;
 
   await recordSimulationStep({
@@ -700,6 +882,15 @@ export async function rollbackSimulation(simulationId: string, user: UserIdentit
   await prisma.simulation.update({
     where: { id: sim.id },
     data: { state: finalState, isRollbackable: errors.length > 0, completedAt: new Date() }
+  });
+
+  await prisma.recoveryAction.create({
+    data: {
+      simulationId: sim.id,
+      description: 'Manual rollback executed',
+      success: errors.length === 0,
+      completedAt: new Date(),
+    },
   });
 
   await prisma.auditLog.create({
@@ -738,6 +929,7 @@ async function rollbackAndFailStaleSimulation(simulationId: string): Promise<voi
   });
 
   const janitorStartMs = Date.now();
+  let janitorHasErrors = false;
 
   for (const entry of sim.rollbackEntries) {
     try {
@@ -765,7 +957,21 @@ async function rollbackAndFailStaleSimulation(simulationId: string): Promise<voi
         } else {
           await deleteNetworkPolicy(entry.namespace!, entry.resourceName!);
         }
+      } else if (entry.actionName === 'cleanup-tc-qdisc') {
+        // ISSUE-008: Execute tc cleanup persisted in DB — idempotent with '|| true'
+        const snap = data as { selector: string; container: string };
+        const { listPodsBySelector, execCommandInPod } = await import('../kubernetes/ops.js');
+        const pods = await listPodsBySelector(entry.namespace!, snap.selector);
+        for (const pod of pods) {
+          if (pod.metadata?.name) {
+            await execCommandInPod(
+              entry.namespace!, pod.metadata.name, snap.container || '',
+              ['sh', '-c', 'tc qdisc del dev eth0 root 2>/dev/null || true']
+            );
+          }
+        }
       }
+
       await prisma.rollbackEntry.update({
         where: { id: entry.id },
         data: { status: 'completed', completedAt: new Date() }
@@ -783,6 +989,8 @@ async function rollbackAndFailStaleSimulation(simulationId: string): Promise<voi
         namespace: entry.namespace,
       });
     } catch (err: any) {
+      // ISSUE-024: Track errors so final summary step reports correct status
+      janitorHasErrors = true;
       console.error(`[Simulator:${simulationId}] [Janitor] Rollback failed for entry ${entry.id}:`, err);
       await prisma.rollbackEntry.update({
         where: { id: entry.id },
@@ -800,18 +1008,22 @@ async function rollbackAndFailStaleSimulation(simulationId: string): Promise<voi
         resourceName: entry.resourceName,
         namespace: entry.namespace,
       });
+      // Continue with remaining rollback entries — do not abort on partial failure
     }
   }
 
+  // ISSUE-024: Final summary correctly reflects whether any steps failed
   await recordSimulationStep({
     simulationId: sim.id,
     failureType: sim.failureType,
-    name: 'Janitor Rollback Complete',
+    name: janitorHasErrors ? 'Janitor Rollback Completed with Errors' : 'Janitor Rollback Complete',
     stepType: 'rollback',
     phase: 'recovery',
-    status: 'success',
+    status: janitorHasErrors ? 'failed' : 'success',
     durationMs: Date.now() - janitorStartMs,
-    message: '[Janitor] Stale simulation rollback finished',
+    message: janitorHasErrors
+      ? '[Janitor] Stale simulation rollback finished with errors — manual intervention may be required'
+      : '[Janitor] Stale simulation rollback finished successfully',
   });
 
   const active = getActiveRun(simulationId);
@@ -819,9 +1031,11 @@ async function rollbackAndFailStaleSimulation(simulationId: string): Promise<voi
     active.controller.abort();
   }
 
+  // ISSUE-024: Correctly reflect janitor outcome. Clean rollback → 'cancelled' (the
+  // simulation was stale/orphaned but Kubernetes state was restored). Errors → 'failed'.
   await prisma.simulation.update({
     where: { id: simulationId },
-    data: { state: 'failed', completedAt: new Date() },
+    data: { state: janitorHasErrors ? 'failed' : 'cancelled', completedAt: new Date() },
   });
 }
 
@@ -854,6 +1068,7 @@ export async function startSimulationWorker(): Promise<void> {
         });
 
         const workerStartMs = Date.now();
+        let workerHasErrors = false;
 
         for (const entry of sim.rollbackEntries) {
           try {
@@ -884,6 +1099,19 @@ export async function startSimulationWorker(): Promise<void> {
               } else {
                 await deleteNetworkPolicy(entry.namespace!, entry.resourceName!);
               }
+            } else if (entry.actionName === 'cleanup-tc-qdisc') {
+              // ISSUE-008: Execute tc cleanup from persisted DB entry — idempotent with '|| true'
+              const snap = data as { selector: string; container: string };
+              const { listPodsBySelector, execCommandInPod } = await import('../kubernetes/ops.js');
+              const pods = await listPodsBySelector(entry.namespace!, snap.selector);
+              for (const pod of pods) {
+                if (pod.metadata?.name) {
+                  await execCommandInPod(
+                    entry.namespace!, pod.metadata.name, snap.container || '',
+                    ['sh', '-c', 'tc qdisc del dev eth0 root 2>/dev/null || true']
+                  );
+                }
+              }
             }
 
             await prisma.rollbackEntry.update({
@@ -903,6 +1131,8 @@ export async function startSimulationWorker(): Promise<void> {
               namespace: entry.namespace,
             });
           } catch (err: any) {
+            // Track error but continue with remaining entries — do not abort on partial failure
+            workerHasErrors = true;
             console.error(`[Simulator:${sim.id}] [Recovery] Failed to recover rollback entry ${entry.id}:`, err);
             await prisma.rollbackEntry.update({
               where: { id: entry.id },
@@ -926,37 +1156,49 @@ export async function startSimulationWorker(): Promise<void> {
         await recordSimulationStep({
           simulationId: sim.id,
           failureType: sim.failureType,
-          name: 'Startup Recovery Complete',
+          name: workerHasErrors ? 'Startup Recovery Completed with Errors' : 'Startup Recovery Complete',
           stepType: 'rollback',
           phase: 'recovery',
-          status: 'success',
+          status: workerHasErrors ? 'failed' : 'success',
           durationMs: Date.now() - workerStartMs,
-          message: '[Worker] Startup recovery finished',
+          message: workerHasErrors
+            ? '[Worker] Startup recovery finished with errors — some resources may need manual intervention'
+            : '[Worker] Startup recovery finished successfully',
         });
+
+        const workerFinalState = workerHasErrors ? ('rolled_back' as ExperimentState) : ('completed' as ExperimentState);
 
         await prisma.simulation.update({
           where: { id: sim.id },
-          data: { state: 'failed', completedAt: new Date() }
+          data: { state: workerFinalState, completedAt: new Date() },
         });
 
         await prisma.failureEvent.updateMany({
           where: { simulationId: sim.id, state: 'running' },
-          data: { state: 'failed', endedAt: new Date(), errorMessage: 'Recovered from worker restart; rollback executed.' }
+          data: {
+            state: workerHasErrors ? 'rolled_back' : 'completed',
+            endedAt: new Date(),
+            errorMessage: workerHasErrors
+              ? 'Recovered from worker restart; rollback completed with errors.'
+              : 'Recovered from worker restart; rollback executed.',
+          },
         });
 
         await prisma.report.create({
           data: {
             simulationId: sim.id,
-            summary: 'Recovered from worker restart',
-            result: 'failed',
+            summary: workerHasErrors ? 'Recovered from worker restart (with errors)' : 'Recovered from worker restart',
+            result: workerHasErrors ? 'rolled_back' : 'completed',
             failureType: sim.failureType,
             method: 'unknown',
             namespace: sim.namespace,
             durationSeconds: sim.durationSeconds,
             startedAt: sim.startedAt ?? new Date(),
             endedAt: new Date(),
-            errors: 'Simulation orphaned after worker crash/restart; state restored.'
-          } as any
+            errors: workerHasErrors
+              ? 'Simulation orphaned after worker crash/restart; rollback executed with errors.'
+              : null,
+          } as any,
         });
       }
     }

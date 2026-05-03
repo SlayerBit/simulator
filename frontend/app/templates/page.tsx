@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Activity, Play, Plus, Trash2, Edit3, Loader2 } from 'lucide-react';
 import { AppHeader } from '@/components/layout/app-header';
@@ -14,6 +14,37 @@ import { useAuth } from '@/hooks/useAuth';
 import { api } from '@/services/api';
 import type { Template } from '@/types';
 
+const VISIBLE_FAILURE_TYPES = [
+  'pod_crash',
+  'service_unavailability',
+  'network_failure',
+  'resource_pressure',
+  'rollout_failure',
+] as const;
+
+const METHODS_BY_FAILURE: Record<(typeof VISIBLE_FAILURE_TYPES)[number], { id: string; label: string }[]> = {
+  pod_crash: [
+    { id: 'delete-pods', label: 'Delete pods' },
+    { id: 'restart-pods', label: 'Restart pods' },
+  ],
+  service_unavailability: [
+    { id: 'scale-to-zero', label: 'Scale to zero' },
+    { id: 'scale-down', label: 'Scale down' },
+  ],
+  network_failure: [
+    { id: 'deny-ingress', label: 'Deny ingress' },
+    { id: 'deny-egress', label: 'Deny egress' },
+  ],
+  resource_pressure: [
+    { id: 'reduce-memory-limits', label: 'Reduce memory limits' },
+    { id: 'update-cpu-resources', label: 'Update CPU limits' },
+  ],
+  rollout_failure: [
+    { id: 'restart-deployment', label: 'Restart deployment' },
+    { id: 'invalid-command', label: 'Invalid command (exit 137)' },
+  ],
+};
+
 export default function TemplatesPage() {
   const router = useRouter(); 
   const { token, loading, user, logout } = useAuth();
@@ -23,6 +54,30 @@ export default function TemplatesPage() {
   const [editingTemplate, setEditingTemplate] = useState<Template | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [formFailureType, setFormFailureType] = useState<(typeof VISIBLE_FAILURE_TYPES)[number]>('pod_crash');
+  const [formMethod, setFormMethod] = useState<string>('delete-pods');
+
+  const methodChoices = useMemo(() => METHODS_BY_FAILURE[formFailureType] ?? [], [formFailureType]);
+
+  useEffect(() => {
+    const allowed = new Set(methodChoices.map((m) => m.id));
+    if (!allowed.has(formMethod)) {
+      setFormMethod(methodChoices[0]?.id ?? 'delete-pods');
+    }
+  }, [formFailureType, methodChoices, formMethod]);
+
+  useEffect(() => {
+    if (!modalOpen) return;
+    if (editingTemplate) {
+      const ft = editingTemplate.failureType as (typeof VISIBLE_FAILURE_TYPES)[number];
+      if (VISIBLE_FAILURE_TYPES.includes(ft)) setFormFailureType(ft);
+      const m = (editingTemplate.config as any)?.method;
+      if (typeof m === 'string') setFormMethod(m);
+    } else {
+      setFormFailureType('pod_crash');
+      setFormMethod('delete-pods');
+    }
+  }, [editingTemplate, modalOpen]);
 
   const fetchTemplates = async () => {
     if (!token) return;
@@ -60,10 +115,24 @@ export default function TemplatesPage() {
     const data = Object.fromEntries(formData.entries());
     
     try {
+      const base = {
+        name: data.name,
+        description: data.description,
+        failureType: formFailureType,
+        defaultNamespace: data.defaultNamespace,
+        defaultService: data.defaultService,
+        defaultIntensity: data.defaultIntensity,
+        defaultDurationSeconds: data.defaultDurationSeconds,
+        method: formMethod,
+        config: {
+          ...(typeof editingTemplate?.config === 'object' && editingTemplate.config ? editingTemplate.config : {}),
+          method: formMethod,
+        },
+      };
       if (editingTemplate) {
-        await api.updateTemplate(token, editingTemplate.id, data);
+        await api.updateTemplate(token, editingTemplate.id, base);
       } else {
-        await api.createTemplate(token, data);
+        await api.createTemplate(token, base);
       }
       setModalOpen(false);
       setEditingTemplate(null);
@@ -107,12 +176,28 @@ export default function TemplatesPage() {
                     </div>
                     <div className="grid gap-2">
                       <span className="text-xs font-medium text-slate-400">Failure Type</span>
-                      <select name="failureType" defaultValue={editingTemplate?.failureType || 'pod_crash'} className="flex h-9 w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-slate-700">
-                        <option value="pod_crash">Pod Crash</option>
-                        <option value="network_latency">Network Latency</option>
-                        <option value="service_unavailability">Service Unavailability</option>
-                        <option value="database_connection_failure">DB Connection Failure</option>
-                        <option value="cpu_saturation">CPU Saturation</option>
+                      <select
+                        name="failureType"
+                        value={formFailureType}
+                        onChange={(e) => setFormFailureType(e.target.value as (typeof VISIBLE_FAILURE_TYPES)[number])}
+                        className="flex h-9 w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-slate-700"
+                      >
+                        {VISIBLE_FAILURE_TYPES.map((t) => (
+                          <option key={t} value={t}>{t.replaceAll('_', ' ')}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="grid gap-2">
+                      <span className="text-xs font-medium text-slate-400">Method</span>
+                      <select
+                        name="method"
+                        value={formMethod}
+                        onChange={(e) => setFormMethod(e.target.value)}
+                        className="flex h-9 w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-slate-700"
+                      >
+                        {methodChoices.map((m) => (
+                          <option key={m.id} value={m.id}>{m.label}</option>
+                        ))}
                       </select>
                     </div>
                     <div className="grid gap-2">

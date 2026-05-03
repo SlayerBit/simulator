@@ -1,6 +1,7 @@
 import cron, { type ScheduledTask } from 'node-cron';
 import { getPrismaClient } from '../database/client.js';
 import { createSimulationRecord, runSimulation, createSimulationName } from '../simulations/service.js';
+import { assertVisibleFailureMethod, templateIsAllowlisted } from '../failures/allowlist.js';
 
 const tasks = new Map<string, ScheduledTask>();
 
@@ -20,17 +21,28 @@ export async function refreshSchedules(): Promise<void> {
       if (!sched.templateId) return;
       const template = await db.template.findUnique({ where: { id: sched.templateId } });
       if (!template) return;
+      if (!templateIsAllowlisted(template)) {
+        console.warn(`[Scheduler] Skipping non-allowlisted template ${template.id}`);
+        return;
+      }
 
       const admin = await db.user.findFirst({ where: { role: 'admin' } });
       if (!admin) return;
 
       const input: any = template.config || {};
+      const method = input.method || 'delete-pods';
+      try {
+        assertVisibleFailureMethod(template.failureType, method);
+      } catch {
+        console.warn(`[Scheduler] Skipping template ${template.id} — method not on production allowlist`);
+        return;
+      }
       const sim = await createSimulationRecord(
         { id: admin.id, email: admin.email, role: 'admin' as any },
         {
           name: createSimulationName(`sched-${template.name}`),
           failureType: template.failureType as any,
-          method: input.method || 'delete-pods',
+          method,
           target: {
             namespace: template.defaultNamespace || input.namespace || 'simulator',
             serviceName: template.defaultService || input.serviceName,

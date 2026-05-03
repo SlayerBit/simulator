@@ -19,6 +19,9 @@ export type ExperimentState =
 export type FailureType =
   | 'pod_crash'
   | 'service_unavailability'
+  | 'network_failure'
+  | 'resource_pressure'
+  | 'rollout_failure'
   | 'database_connection_failure'
   | 'cache_unavailability'
   | 'network_latency'

@@ -35,12 +35,9 @@ export class RollbackStack {
       message: 'Self-healing context initialized. Dispatched restoration sequence.',
     });
 
-    // Process in reverse order (LIFO)
+    // Process in reverse order (LIFO). Do not bail early when signal is aborted: still attempt
+    // later steps (#8 — best-effort restore; failures are aggregated).
     for (let i = this.actions.length - 1; i >= 0; i--) {
-      if (signal?.aborted) {
-        errors.push(`Rollback aborted by signal at step ${i}`);
-        break;
-      }
       const action = this.actions[i];
       if (!action) continue;
 
@@ -66,21 +63,36 @@ export class RollbackStack {
           break;
         } catch (e: any) {
           lastError = e;
-          if (e?.name === 'AbortError') {
+          // ISSUE-009: Detect AbortError by both name and message since new Error('AbortError')
+          // sets name='Error', not 'AbortError'. Stop retrying on abort.
+          const isAbort = e?.name === 'AbortError' || e?.message === 'AbortError';
+          if (isAbort) {
             success = false;
             break;
           }
           if (attempt < maxRetries) {
             const delay = Math.pow(2, attempt) * 1000;
             console.warn(`[Rollback] Action "${action.name}" failed (attempt ${attempt}/${maxRetries}). Retrying in ${delay}ms...`, e?.message ?? e);
-            
-            await new Promise((resolve, reject) => {
-              const t = setTimeout(resolve, delay);
-              signal?.addEventListener('abort', () => {
-                clearTimeout(t);
-                reject(new Error('AbortError'));
-              }, { once: true });
-            });
+
+            // Wait with abort support. If abort fires during the delay, stop retrying.
+            try {
+              await new Promise<void>((resolve, reject) => {
+                const t = setTimeout(resolve, delay);
+                if (signal?.aborted) {
+                  clearTimeout(t);
+                  reject(Object.assign(new Error('AbortError'), { name: 'AbortError' }));
+                  return;
+                }
+                signal?.addEventListener('abort', () => {
+                  clearTimeout(t);
+                  reject(Object.assign(new Error('AbortError'), { name: 'AbortError' }));
+                }, { once: true });
+              });
+            } catch (abortErr: any) {
+              lastError = abortErr;
+              success = false;
+              break;
+            }
           }
         }
       }
@@ -99,7 +111,7 @@ export class RollbackStack {
       } else {
         errors.push(`${action.name}: ${lastError?.message ?? String(lastError)} (failed after ${maxRetries} attempts)`);
         console.error(`[Rollback] Action "${action.name}" failed permanently after ${maxRetries} attempts.`);
-        
+
         await recordSimulationStep({
           simulationId,
           name: `Failed: ${action.name}`,
@@ -110,8 +122,6 @@ export class RollbackStack {
           error: lastError?.message ?? String(lastError),
           durationMs: Date.now() - actionStart,
         });
-
-        if (lastError?.name === 'AbortError') break;
       }
     }
 

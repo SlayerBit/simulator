@@ -13,6 +13,18 @@ export interface FailureParams {
   simulationId: string;
   rollback: RollbackStack;
   signal?: AbortSignal;
+  /** Set during validate/apply for post-apply verification (never persisted). */
+  executionHints?: {
+    prePodCount?: number;
+    preScaleReplicas?: number;
+    scaleTargetReplicas?: number;
+    preDeploymentGeneration?: number;
+    preTemplateRestartAnnotation?: string | null;
+    expectedMemoryLimit?: string;
+    expectedCpuLimit?: string;
+    networkPolicyName?: string;
+    applyDeletedCount?: number;
+  };
 }
 
 export interface FailureResult {
@@ -49,4 +61,8 @@ export interface FailureMethod {
   validate: (params: FailureParams) => Promise<void>;
   apply: (params: FailureParams) => Promise<FailureResult>;
   rollback: (params: FailureParams) => Promise<void>;
+  /** After apply(), confirm the cluster reflects the failure (live runs only). */
+  verifyApplied?: (params: FailureParams) => Promise<void>;
+  /** Description of planned actions for dry-run logs (after validate). */
+  dryRunPlan?: (params: FailureParams) => Promise<string> | string;
 }

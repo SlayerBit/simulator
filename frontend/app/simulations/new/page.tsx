@@ -13,20 +13,13 @@ import { Input } from '@/components/ui/input';
 import { useAuth } from '@/hooks/useAuth';
 import { api } from '@/services/api';
 
+/** Production allowlist: five categories, ten methods total (see backend allowlist). */
 const failureTypes = [
   'pod_crash',
   'service_unavailability',
-  'database_connection_failure',
-  'cache_unavailability',
-  'network_latency',
-  'packet_loss',
-  'cpu_saturation',
-  'memory_pressure',
-  'disk_pressure',
-  'deployment_misconfiguration',
-  'autoscaling_failure',
-  'failing_health_probes',
-  'ingress_misrouting',
+  'network_failure',
+  'resource_pressure',
+  'rollout_failure',
 ] as const;
 
 export default function NewSimulationPage() {

@@ -333,6 +333,37 @@ export async function deletePodsBySelector(
   }
 }
 
+/** Triggers a rolling restart by bumping the standard kubectl restartedAt annotation. */
+export async function rolloutRestartDeployment(
+  namespace: string,
+  deploymentName: string,
+  ref?: StepRef,
+  signal?: AbortSignal
+): Promise<void> {
+  const dep = await readDeployment(namespace, deploymentName, signal);
+  const now = new Date().toISOString();
+  const existing = dep?.spec?.template?.metadata?.annotations ?? {};
+  const annotations = {
+    ...existing,
+    'kubectl.kubernetes.io/restartedAt': now,
+  };
+  await patchDeploymentTemplate(
+    namespace,
+    deploymentName,
+    strategicMergePatch({
+      spec: {
+        template: {
+          metadata: {
+            annotations,
+          },
+        },
+      },
+    }),
+    ref,
+    signal
+  );
+}
+
 export async function patchDeploymentTemplate(
   namespace: string,
   deploymentName: string,
@@ -410,7 +441,7 @@ export async function readNetworkPolicy(
   } catch (e: any) {
     // BUG-24 fix: Only treat 404 as "not found". Rethrow auth/server errors.
     const status = e?.statusCode ?? e?.response?.statusCode ?? e?.body?.code;
-    if (status === 404 || status === undefined) return null;
+    if (status === 404) return null;
     console.error(`[K8s Ops] Failed to read NetworkPolicy ${policyName} in ${ns}:`, e?.message ?? e);
     throw e;
   }
@@ -491,8 +522,16 @@ export async function replaceNetworkPolicy(
     console.log(`[K8s Ops] Replacing NetworkPolicy ${policyName} in ${ns}...`);
     const cleanBody = JSON.parse(JSON.stringify(body));
     if (!cleanBody.metadata) cleanBody.metadata = {};
-    cleanBody.metadata.name = policyName;
-    cleanBody.metadata.namespace = ns;
+    const meta = cleanBody.metadata;
+    delete meta.resourceVersion;
+    delete meta.uid;
+    delete meta.managedFields;
+    delete meta.creationTimestamp;
+    delete meta.generation;
+    delete cleanBody.status;
+
+    meta.name = policyName;
+    meta.namespace = ns;
 
     await withTimeout(netApi.replaceNamespacedNetworkPolicy({
       name: policyName,
@@ -546,33 +585,59 @@ export async function upsertNetworkPolicy(
   const start = Date.now();
   const netApi = net as any;
 
-  try {
-    // BUG-20 fix: Wrap all inner K8s calls in withTimeout to prevent indefinite blocking.
-    try {
-      const cleanBody = JSON.parse(JSON.stringify(spec));
-      if (!cleanBody.metadata) cleanBody.metadata = {};
-      cleanBody.metadata.name = policyName;
-      cleanBody.metadata.namespace = ns;
+  /** Strip cluster-managed fields from any body before a PUT (replace) request.
+   *  Missing resourceVersion is acceptable — the API server will reject stale ones anyway.
+   *  ISSUE-017: applied here to prevent 409/422 on NetworkPolicy replace inside upsert. */
+  function cleanForReplace(src: any): any {
+    const body = JSON.parse(JSON.stringify(src));
+    if (!body.metadata) body.metadata = {};
+    const m = body.metadata;
+    delete m.resourceVersion;
+    delete m.uid;
+    delete m.managedFields;
+    delete m.creationTimestamp;
+    delete m.generation;
+    delete body.status;
+    m.name = policyName;
+    m.namespace = ns;
+    return body;
+  }
 
-      await withTimeout(netApi.readNamespacedNetworkPolicy({
+  try {
+    // ISSUE-016: Split read and replace into separate try/catch blocks so that
+    // non-404 errors from each operation are surfaced independently and never swallowed.
+    let existingPolicy: any | null = null;
+    try {
+      const res: any = await withTimeout(netApi.readNamespacedNetworkPolicy({
         name: policyName,
         namespace: ns
       }), DEFAULT_TIMEOUT_MS, signal);
+      // Match readNetworkPolicy: normalized object, undefined status tolerated the same way.
+      existingPolicy = res?.body ?? res ?? null;
+    } catch (readErr: any) {
+      const readStatus = readErr?.statusCode ?? readErr?.response?.statusCode ?? readErr?.body?.code;
+      if (readStatus !== 404) {
+        // Non-404 read error (permissions, network, etc.) — do NOT swallow.
+        throw readErr;
+      }
+      // 404: policy does not exist, fall through to create.
+      existingPolicy = null;
+    }
 
+    if (existingPolicy != null) {
+      // Policy exists — replace it. ISSUE-017: strip cluster fields.
+      const replaceBody = cleanForReplace(spec);
       await withTimeout(netApi.replaceNamespacedNetworkPolicy({
         name: policyName,
         namespace: ns,
-        body: cleanBody
+        body: replaceBody
       }), DEFAULT_TIMEOUT_MS, signal);
-    } catch {
-      const cleanBody = JSON.parse(JSON.stringify(spec));
-      if (!cleanBody.metadata) cleanBody.metadata = {};
-      cleanBody.metadata.name = policyName;
-      cleanBody.metadata.namespace = ns;
-
+    } else {
+      // Policy does not exist — create it (strip cluster metadata like replace path).
+      const createBody = cleanForReplace(spec);
       await withTimeout(netApi.createNamespacedNetworkPolicy({
         namespace: ns,
-        body: cleanBody
+        body: createBody
       }), DEFAULT_TIMEOUT_MS, signal);
     }
 
@@ -644,6 +709,27 @@ export async function deleteNetworkPolicy(
       });
     }
   } catch (e: any) {
+    const status = e?.statusCode ?? e?.response?.statusCode ?? e?.body?.code;
+    if (status === 404) {
+      console.log(`[K8s Ops] NetworkPolicy ${policyName} not found during delete (ignoring 404)`);
+      if (ref) {
+        await recordSimulationStep({
+          simulationId: ref.simulationId,
+          name: ref.name,
+          failureType: ref.failureType,
+          stepType: 'rollback',
+          status: 'success',
+          command: `kubectl delete networkpolicy ${policyName} -n ${ns}`,
+          message: `NetworkPolicy ${policyName} was already deleted`,
+          resourceType: 'NetworkPolicy',
+          resourceName: policyName,
+          namespace: ns,
+          durationMs: Date.now() - start,
+        });
+      }
+      return;
+    }
+
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
