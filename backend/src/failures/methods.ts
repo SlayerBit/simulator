@@ -2680,14 +2680,26 @@ const rolloutFailureInvalidCommand: FailureMethod = {
     const dep = requireDeployment(p);
     const cname = await resolveMainContainerName(p.target.namespace, dep);
     await snapshotDeployment(p, dep);
-    const live = await readDeployment(p.target.namespace, dep, p.signal);
-    const body = JSON.parse(JSON.stringify(live));
-    const containers = body?.spec?.template?.spec?.containers;
-    const cont = Array.isArray(containers) ? containers.find((x: any) => x.name === cname) : null;
-    if (!cont) throw new Error(`invalid-command: container "${cname}" not found in deployment template`);
-    cont.command = ['sh', '-c', 'exit 137'];
-    await replaceDeployment(p.target.namespace, dep, body, ref, p.signal);
-    return ok('Replaced deployment with failing command (recoverable via snapshot rollback / rollout revision)');
+    
+    await patchDeploymentTemplate(p.target.namespace, dep, {
+      contentType: 'application/strategic-merge-patch+json',
+      body: {
+        spec: {
+          template: {
+            spec: {
+              containers: [
+                {
+                  name: cname,
+                  command: ['sh', '-c', 'exit 137'],
+                },
+              ],
+            },
+          },
+        },
+      },
+    }, ref, p.signal);
+    
+    return ok('Patched deployment container with failing command (recoverable via snapshot rollback)');
   },
   verifyApplied: async (p) => {
     const dep = requireDeployment(p);

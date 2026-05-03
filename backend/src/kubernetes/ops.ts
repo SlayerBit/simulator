@@ -418,13 +418,13 @@ export async function patchDeploymentTemplate(
     const appsApi = apps as AppsV1Api;
     console.log(`[K8s Ops] Patching deployment ${deploymentName} in ${ns}...`);
 
-    // BUG-19 fix: Use cached patch client instead of creating a new one per call.
-    const patchApi = getCachedPatchClient(appsApi, patch.contentType);
-
-    await withTimeout(patchApi.patchNamespacedDeployment({
+    // Fix: Pass headers in options instead of using custom client
+    const options: any = { headers: { 'Content-Type': patch.contentType } };
+    await withTimeout((appsApi as any).patchNamespacedDeployment({
       name: deploymentName,
       namespace: ns,
-      body: patch.body
+      body: patch.body,
+      options
     }), DEFAULT_TIMEOUT_MS, signal);
     if (ref) {
       await recordSimulationStep({
