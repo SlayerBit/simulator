@@ -11,6 +11,7 @@ import {
   replaceNetworkPolicy,
   scaleDeployment,
   upsertNetworkPolicy,
+  isNetworkPolicySnapshotData,
   listPodsBySelector,
   execCommandInPod,
   rolloutRestartDeployment,
@@ -222,14 +223,14 @@ async function restoreNetworkPolicy(simulationId: string, namespace: string, pol
     if (!dbEntry) {
       throw new Error(`[Rollback] Critical: No snapshot found for networkpolicy ${policyName} in memory or DB.`);
     }
-    const data = dbEntry.snapshotData as any;
-    if (data) {
+    const data = dbEntry.snapshotData as unknown;
+    if (isNetworkPolicySnapshotData(data)) {
       await replaceNetworkPolicy(namespace, policyName, data, ref, signal);
     } else {
       await deleteNetworkPolicy(namespace, policyName, ref, signal);
     }
   } else {
-    if (snap.body) {
+    if (isNetworkPolicySnapshotData(snap.body)) {
       await replaceNetworkPolicy(namespace, policyName, snap.body, ref, signal);
     } else {
       await deleteNetworkPolicy(namespace, policyName, ref, signal);
@@ -282,6 +283,15 @@ function requireLabelSelector(p: FailureParams): string {
 function npName(simulationId: string, suffix: string): string {
   return `sim-${simulationId}-${suffix}`.slice(0, 63);
 }
+
+/**
+ * Durable deny-all traffic: one rule whose peer selector can never match a real workload.
+ * Apiservers may omit empty `ingress`/`egress` lists; a single explicit rule keeps deny semantics
+ * in etcd and works across CNIs that enforce NetworkPolicy.
+ */
+const CHAOS_NETPOL_UNMATCHABLE: Record<string, string> = {
+  'chaos.simulator.io/unmatchable-peer': 'cf4d2c8e-6b84-4f9a-9c2b-000000000001',
+};
 
 async function ok(message: string): Promise<FailureResult> {
   return { applied: true, message };
@@ -658,7 +668,11 @@ const networkFailureDenyIngress: FailureMethod = {
       spec: {
         podSelector: { matchLabels: selectorToMatchLabels(selector) },
         policyTypes: ['Ingress'],
-        ingress: [],
+        ingress: [
+          {
+            from: [{ podSelector: { matchLabels: { ...CHAOS_NETPOL_UNMATCHABLE } } }],
+          },
+        ],
       },
     }, ref, p.signal);
     return ok('Applied deny-ingress NetworkPolicy');
@@ -705,7 +719,11 @@ const networkFailureDenyEgress: FailureMethod = {
       spec: {
         podSelector: { matchLabels: selectorToMatchLabels(selector) },
         policyTypes: ['Egress'],
-        egress: [],
+        egress: [
+          {
+            to: [{ podSelector: { matchLabels: { ...CHAOS_NETPOL_UNMATCHABLE } } }],
+          },
+        ],
       },
     }, ref, p.signal);
     return ok('Applied deny-egress NetworkPolicy');

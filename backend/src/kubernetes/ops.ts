@@ -1,4 +1,6 @@
 import { CoreV1Api, AppsV1Api, NetworkingV1Api } from '@kubernetes/client-node';
+// Plain objects lose nested rule peers: OpenAPI models use `_from` internally while JSON uses `from`.
+import { ObjectSerializer } from '@kubernetes/client-node/dist/gen/models/ObjectSerializer.js';
 import { getKubeClients } from './client.js';
 import { recordSimulationStep } from '../simulations/steps.js';
 
@@ -45,6 +47,39 @@ function ensureNamespace(namespace: string | null | undefined): string {
   if (!namespace) return DEFAULT_NAMESPACE;
   if (namespace === 'undefined' || namespace === 'null') return DEFAULT_NAMESPACE;
   return namespace;
+}
+
+/**
+ * Build a NetworkPolicy body the kubernetes client can serialize without dropping `from` / `to` peers.
+ * (ObjectSerializer.serialize reads model field names like `_from`, not JSON `from`.)
+ */
+function toApiNetworkPolicyBody(namespace: string, policyName: string, manifest: Record<string, unknown>): object {
+  const body = JSON.parse(JSON.stringify(manifest)) as Record<string, unknown>;
+  if (!body.metadata || typeof body.metadata !== 'object') body.metadata = {};
+  const m = body.metadata as Record<string, unknown>;
+  delete m.resourceVersion;
+  delete m.uid;
+  delete m.managedFields;
+  delete m.creationTimestamp;
+  delete m.generation;
+  delete body.status;
+  m.name = policyName;
+  m.namespace = ensureNamespace(namespace);
+  return ObjectSerializer.deserialize(body, 'V1NetworkPolicy', '');
+}
+
+/** client-node decodes NetworkPolicy peers as `_from` / `_to`; wire JSON uses `from` / `to`. */
+function normalizeNetworkPolicyReadJson(value: unknown): unknown {
+  if (value == null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(normalizeNetworkPolicyReadJson);
+  const src = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(src)) {
+    if (k === '_from') out.from = normalizeNetworkPolicyReadJson(v);
+    else if (k === '_to') out.to = normalizeNetworkPolicyReadJson(v);
+    else out[k] = normalizeNetworkPolicyReadJson(v);
+  }
+  return out;
 }
 
 export function strategicMergePatch(body: unknown): PatchSpec {
@@ -441,11 +476,11 @@ export async function readNetworkPolicy(
       namespace: ns
     }), DEFAULT_TIMEOUT_MS, signal);
 
-    return res?.body ?? res;
+    const raw = res?.body ?? res;
+    return normalizeNetworkPolicyReadJson(JSON.parse(JSON.stringify(raw))) as any;
   } catch (e: any) {
     // BUG-24 fix: Only treat 404 as "not found". Rethrow auth/server errors.
-    const status = e?.statusCode ?? e?.response?.statusCode ?? e?.body?.code;
-    if (status === 404) return null;
+    if (k8sHttpStatus(e) === 404) return null;
     console.error(`[K8s Ops] Failed to read NetworkPolicy ${policyName} in ${ns}:`, e?.message ?? e);
     throw e;
   }
@@ -466,14 +501,13 @@ export async function applyNetworkPolicy(
     console.log(`[K8s Ops] Creating NetworkPolicy in ${ns}...`);
     const cleanBody = JSON.parse(JSON.stringify(body));
     if (!cleanBody.metadata) cleanBody.metadata = {};
-    if (!cleanBody.metadata.name) {
-       // fallback to body.name or other if exists, but usually body IS the policy object
-    }
-    cleanBody.metadata.namespace = ns;
+    const policyName = String(cleanBody.metadata.name ?? '');
+    if (!policyName) throw new Error('NetworkPolicy metadata.name is required');
+    const apiBody = toApiNetworkPolicyBody(ns, policyName, cleanBody as Record<string, unknown>);
 
     await withTimeout(netApi.createNamespacedNetworkPolicy({
       namespace: ns,
-      body: cleanBody
+      body: apiBody
     }), DEFAULT_TIMEOUT_MS, signal);
     if (ref) {
       await recordSimulationStep({
@@ -526,21 +560,12 @@ export async function replaceNetworkPolicy(
     console.log(`[K8s Ops] Replacing NetworkPolicy ${policyName} in ${ns}...`);
     const cleanBody = JSON.parse(JSON.stringify(body));
     if (!cleanBody.metadata) cleanBody.metadata = {};
-    const meta = cleanBody.metadata;
-    delete meta.resourceVersion;
-    delete meta.uid;
-    delete meta.managedFields;
-    delete meta.creationTimestamp;
-    delete meta.generation;
-    delete cleanBody.status;
-
-    meta.name = policyName;
-    meta.namespace = ns;
+    const apiBody = toApiNetworkPolicyBody(ns, policyName, cleanBody as Record<string, unknown>);
 
     await withTimeout(netApi.replaceNamespacedNetworkPolicy({
       name: policyName,
       namespace: ns,
-      body: cleanBody
+      body: apiBody
     }), DEFAULT_TIMEOUT_MS, signal);
     if (ref) {
       await recordSimulationStep({
@@ -577,8 +602,41 @@ export async function replaceNetworkPolicy(
   }
 }
 
-function k8sHttpStatus(err: any): number {
-  return Number(err?.statusCode ?? err?.response?.statusCode ?? err?.body?.code ?? err?.body?.status ?? 0);
+export function k8sHttpStatus(err: any): number {
+  const candidates = [
+    err?.statusCode,
+    err?.response?.statusCode,
+    err?.response?.status,
+    err?.httpStatusCode,
+    err?.code,
+    err?.body?.code,
+    err?.body?.status,
+  ];
+  for (const raw of candidates) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 0;
+}
+
+/** True when create failed because the object already exists (safe to replace). Not 422 validation errors. */
+function isAlreadyExistsKubernetesError(err: any): boolean {
+  if (k8sHttpStatus(err) === 409) return true;
+  const reason = err?.body?.reason ?? err?.reason;
+  if (reason === 'AlreadyExists') return true;
+  const msg = String(err?.body?.message ?? err?.message ?? '');
+  if (/already exists/i.test(msg)) return true;
+  return false;
+}
+
+/** Rollback stored a full NetworkPolicy document (replace). Otherwise treat as "we created transient policy" (delete). */
+export function isNetworkPolicySnapshotData(data: unknown): boolean {
+  if (data == null || typeof data !== 'object') return false;
+  const o = data as Record<string, unknown>;
+  if (o.kind !== 'NetworkPolicy') return false;
+  const meta = o.metadata;
+  if (meta == null || typeof meta !== 'object') return false;
+  return typeof (meta as Record<string, unknown>).name === 'string';
 }
 
 export async function upsertNetworkPolicy(
@@ -593,24 +651,8 @@ export async function upsertNetworkPolicy(
   const start = Date.now();
   const netApi = net as any;
 
-  /** Strip cluster-managed fields before create/replace (never send stale resourceVersion). */
-  function cleanForSubmit(src: any): any {
-    const body = JSON.parse(JSON.stringify(src));
-    if (!body.metadata) body.metadata = {};
-    const m = body.metadata;
-    delete m.resourceVersion;
-    delete m.uid;
-    delete m.managedFields;
-    delete m.creationTimestamp;
-    delete m.generation;
-    delete body.status;
-    m.name = policyName;
-    m.namespace = ns;
-    return body;
-  }
-
   try {
-    const body = cleanForSubmit(spec);
+    const body = toApiNetworkPolicyBody(ns, policyName, spec as Record<string, unknown>);
     // Production order: CREATE first (avoids replace-on-missing 404), then REPLACE on conflict.
     try {
       await withTimeout(netApi.createNamespacedNetworkPolicy({
@@ -618,15 +660,27 @@ export async function upsertNetworkPolicy(
         body,
       }), DEFAULT_TIMEOUT_MS, signal);
     } catch (createErr: any) {
-      const cst = k8sHttpStatus(createErr);
-      if (cst === 409 || cst === 422) {
+      // CRITICAL: Only replace when create failed because the object already exists (409 / AlreadyExists).
+      // A 422 validation error means the object was never created — replace would return 404 "not found".
+      if (!isAlreadyExistsKubernetesError(createErr)) {
+        throw createErr;
+      }
+      try {
         await withTimeout(netApi.replaceNamespacedNetworkPolicy({
           name: policyName,
           namespace: ns,
           body,
         }), DEFAULT_TIMEOUT_MS, signal);
-      } else {
-        throw createErr;
+      } catch (replaceErr: any) {
+        // Race: policy deleted between duplicate create and replace — create fresh.
+        if (k8sHttpStatus(replaceErr) === 404) {
+          await withTimeout(netApi.createNamespacedNetworkPolicy({
+            namespace: ns,
+            body,
+          }), DEFAULT_TIMEOUT_MS, signal);
+        } else {
+          throw replaceErr;
+        }
       }
     }
 
@@ -698,8 +752,7 @@ export async function deleteNetworkPolicy(
       });
     }
   } catch (e: any) {
-    const status = e?.statusCode ?? e?.response?.statusCode ?? e?.body?.code;
-    if (status === 404) {
+    if (k8sHttpStatus(e) === 404) {
       console.log(`[K8s Ops] NetworkPolicy ${policyName} not found during delete (ignoring 404)`);
       if (ref) {
         await recordSimulationStep({
