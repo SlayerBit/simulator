@@ -12,7 +12,7 @@ function sleep(ms: number): Promise<void> {
 // GET /api/agent2/logs — proxies Agent 2 GET /logs (must be reachable from this Node process).
 agent2Router.get('/logs', authMiddleware(['admin', 'engineer', 'viewer']), async (_req: Request, res: Response) => {
   const cfg = loadConfig();
-  const url = cfg.agent2LogsUrl.replace(/\s+/g, '');
+  const url = cfg.agent2LogsUrl;
   let lastErr: unknown;
 
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -32,7 +32,12 @@ agent2Router.get('/logs', authMiddleware(['admin', 'engineer', 'viewer']), async
           await sleep(250 * attempt);
           continue;
         }
-        return res.status(502).json({ error: { message: 'Agent 2 logs fetch failed', details: t } });
+        return res.status(502).json({
+          error: {
+            message: `Agent 2 logs fetch failed: upstream HTTP ${resp.status} for ${url}.`,
+            details: t.slice(0, 500),
+          },
+        });
       }
 
       const data = await resp.json().catch(() => ({ logs: [] }));

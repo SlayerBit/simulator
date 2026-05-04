@@ -31,6 +31,35 @@ const envSchema = z.object({
 });
 
 envSchema.parse(process.env);
+
+/**
+ * Agent 2 only serves GET /logs (plus health probes). A base URL like
+ * http://agent2.food-app.svc.cluster.local hits "/" and returns 404 — normalize to /logs.
+ */
+export function normalizeAgent2LogsUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\s+/g, '');
+  if (!trimmed) return 'http://127.0.0.1:8080/logs';
+  let u = trimmed;
+  if (!/^https?:\/\//i.test(u)) {
+    u = `http://${u}`;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(u);
+  } catch {
+    return trimmed.endsWith('/logs') ? trimmed : `${trimmed.replace(/\/+$/, '')}/logs`;
+  }
+  let path = parsed.pathname.replace(/\/+$/, '') || '/';
+  if (path === '/' || path === '') {
+    parsed.pathname = '/logs';
+  } else if (!path.endsWith('/logs')) {
+    parsed.pathname = `${path}/logs`;
+  } else {
+    parsed.pathname = path;
+  }
+  return parsed.toString().replace(/\/+$/, '');
+}
+
 function parseNumberEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -59,9 +88,10 @@ export function loadConfig(): AppConfig {
   const agent2LogsUrlExplicit = process.env.AGENT2_LOGS_URL?.trim();
   const agent2LogsUrlDefaultInCluster = 'http://agent2.food-app.svc.cluster.local/logs';
   const agent2LogsUrlDefaultLocal = 'http://127.0.0.1:8080/logs';
-  const agent2LogsUrl =
+  const agent2LogsUrl = normalizeAgent2LogsUrl(
     agent2LogsUrlExplicit ||
-    (process.env.KUBERNETES_SERVICE_HOST ? agent2LogsUrlDefaultInCluster : agent2LogsUrlDefaultLocal);
+      (process.env.KUBERNETES_SERVICE_HOST ? agent2LogsUrlDefaultInCluster : agent2LogsUrlDefaultLocal),
+  );
   if (
     agent2LogsUrlExplicit?.includes('.svc.cluster.local') &&
     !process.env.KUBERNETES_SERVICE_HOST
