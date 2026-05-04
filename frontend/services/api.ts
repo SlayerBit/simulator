@@ -143,4 +143,8 @@ export const api = {
     request<{ runbooks: any[]; pagination: any }>('/api/runbooks', { method: 'GET', token }),
   getRunbook: (token: string, id: string) =>
     request<{ runbook: any }>(`/api/runbooks/${id}`, { method: 'GET', token }),
+
+  // Agent 2 observability
+  getAgent2Logs: (token: string) =>
+    request<{ logs: any[]; warning?: string }>('/api/agent2/logs', { method: 'GET', token }),
 };

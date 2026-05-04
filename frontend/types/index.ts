@@ -107,3 +107,22 @@ export interface Runbook {
     failureType: string;
   };
 }
+
+export type Agent2LogStatus = 'success' | 'failed' | 'skipped';
+
+export interface Agent2LogEntry {
+  timestamp: string; // UTC ISO
+  event:
+    | 'runbook_received'
+    | 'runbook_parsed'
+    | 'no_actions_found'
+    | 'command_execution_started'
+    | 'command_execution_success'
+    | 'command_execution_failed';
+  runbook_id: string;
+  incident_type: string;
+  action?: string | null;
+  command: string;
+  status: Agent2LogStatus;
+  error?: string | null;
+}

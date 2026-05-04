@@ -1,6 +1,6 @@
 'use client';
 
-import { Activity, CalendarClock, FileClock, FileText, GitBranch, LayoutDashboard, Zap, Shield } from 'lucide-react';
+import { Activity, CalendarClock, FileClock, FileText, GitBranch, LayoutDashboard, Zap, Shield, ActivitySquare } from 'lucide-react';
 import { usePathname, useRouter } from 'next/navigation';
 import { cn } from '@/lib/utils';
 
@@ -9,6 +9,7 @@ const items = [
   { href: '/simulations/new', label: 'New Simulation', icon: Zap },
   { href: '/history', label: 'History', icon: FileClock },
   { href: '/runbooks', label: 'Runbooks', icon: FileText },
+  { href: '/agent-activity', label: 'Agent Activity', icon: ActivitySquare },
   { href: '/audit', label: 'Audit Log', icon: FileText },
   { href: '/templates', label: 'Templates', icon: Activity },
   { href: '/schedules', label: 'Schedules', icon: CalendarClock },

@@ -11,6 +11,7 @@ export interface AppConfig {
   lokiUrl: string | null;
   agent1AnalyzeUrl: string;
   agent1AnalyzeDelayMs: number;
+  agent2LogsUrl: string;
   jwtSecret: string;
   simulatorNamespace: string;
   allowedTargetNamespaces: string[];
@@ -53,6 +54,8 @@ export function loadConfig(): AppConfig {
   const lokiUrl = process.env.LOKI_URL ?? null;
   const agent1AnalyzeUrl =
     process.env.AGENT1_ANALYZE_URL ?? 'http://agent1.agent-system.svc.cluster.local:8000/analyze/live';
+  const agent2LogsUrl =
+    process.env.AGENT2_LOGS_URL ?? 'http://agent2.food-app.svc.cluster.local/logs';
   // Keep this small: long delays push Agent 1 analysis past brief failure windows.
   const agent1AnalyzeDelayMs = Math.max(0, parseNumberEnv('AGENT1_ANALYZE_DELAY_MS', 2000));
   const jwtSecret = process.env.JWT_SECRET;
@@ -113,6 +116,7 @@ export function loadConfig(): AppConfig {
     lokiUrl,
     agent1AnalyzeUrl,
     agent1AnalyzeDelayMs,
+    agent2LogsUrl,
     jwtSecret,
     simulatorNamespace,
     allowedTargetNamespaces,

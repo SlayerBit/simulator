@@ -6,13 +6,14 @@ import { usePathname, useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogTrigger, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
-import { Activity, CalendarClock, FileClock, FileText, GitBranch, LayoutDashboard, Shield } from 'lucide-react';
+import { Activity, CalendarClock, FileClock, FileText, GitBranch, LayoutDashboard, Shield, ActivitySquare } from 'lucide-react';
 
 const items = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/simulations/new', label: 'New Simulation', icon: Zap },
   { href: '/history', label: 'History', icon: FileClock },
   { href: '/runbooks', label: 'Runbooks', icon: FileText },
+  { href: '/agent-activity', label: 'Agent Activity', icon: ActivitySquare },
   { href: '/audit', label: 'Audit Log', icon: FileText },
   { href: '/templates', label: 'Templates', icon: Activity },
   { href: '/schedules', label: 'Schedules', icon: CalendarClock },
