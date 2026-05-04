@@ -139,4 +139,8 @@ export const api = {
   // Analytics & Observability
   audit: (token: string) => request<{ events: any[] }>('/api/audit', { method: 'GET', token }),
   metrics: (token: string) => request<any>('/api/metrics', { method: 'GET', token }),
+  listRunbooks: (token: string) =>
+    request<{ runbooks: any[]; pagination: any }>('/api/runbooks', { method: 'GET', token }),
+  getRunbook: (token: string, id: string) =>
+    request<{ runbook: any }>(`/api/runbooks/${id}`, { method: 'GET', token }),
 };

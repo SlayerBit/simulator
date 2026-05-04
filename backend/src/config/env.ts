@@ -9,6 +9,8 @@ export interface AppConfig {
   grafanaUrl: string | null;
   prometheusUrl: string | null;
   lokiUrl: string | null;
+  agent1AnalyzeUrl: string;
+  agent1AnalyzeDelayMs: number;
   jwtSecret: string;
   simulatorNamespace: string;
   allowedTargetNamespaces: string[];
@@ -49,6 +51,9 @@ export function loadConfig(): AppConfig {
   const grafanaUrl = process.env.GRAFANA_URL ?? null;
   const prometheusUrl = process.env.PROMETHEUS_URL ?? null;
   const lokiUrl = process.env.LOKI_URL ?? null;
+  const agent1AnalyzeUrl =
+    process.env.AGENT1_ANALYZE_URL ?? 'http://agent1.agent-system.svc.cluster.local:8000/analyze/live';
+  const agent1AnalyzeDelayMs = Math.max(0, parseNumberEnv('AGENT1_ANALYZE_DELAY_MS', 10000));
   const jwtSecret = process.env.JWT_SECRET;
   const simulatorNamespace = process.env.SIMULATOR_NAMESPACE || 'simulator';
   // Fix: Change line 43 to allow more namespaces or a broader default
@@ -105,6 +110,8 @@ export function loadConfig(): AppConfig {
     grafanaUrl,
     prometheusUrl,
     lokiUrl,
+    agent1AnalyzeUrl,
+    agent1AnalyzeDelayMs,
     jwtSecret,
     simulatorNamespace,
     allowedTargetNamespaces,

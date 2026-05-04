@@ -10,6 +10,7 @@ import { replaceDeployment, scaleDeployment, replaceNetworkPolicy, deleteNetwork
 import { clearSimStepCounter, recordSimulationStep } from './steps.js';
 import { normalizeAndSaveParameters } from './normalization.js';
 import { assertVisibleFailureMethod } from '../failures/allowlist.js';
+import { scheduleRunbookCapture } from '../runbooks/service.js';
 
 export interface CreateSimulationInput {
   name: string;
@@ -428,6 +429,12 @@ export async function runSimulation(simulationId: string): Promise<void> {
       where: { id: simulationId },
       data: { isRollbackable: true }
     });
+
+    // Fire-and-forget runbook capture after failure has been applied.
+    // This does not block simulation orchestration.
+    if (!sim.dryRun) {
+      scheduleRunbookCapture(simulationId);
+    }
 
     if (sim.manualRollback) {
       console.log(`[Simulator:${simulationId}] Simulation ${simulationId} is Manual Recovery mode. Skipping automatic rollback.`);

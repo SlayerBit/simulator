@@ -91,3 +91,19 @@ export interface Pagination {
   limit: number;
   totalPages: number;
 }
+
+export interface Runbook {
+  id: string;
+  simulationId: string;
+  incidentType: string;
+  severity: string;
+  source: string;
+  payload: Record<string, any>;
+  createdAt: string;
+  simulation?: {
+    id: string;
+    name: string;
+    createdById: string;
+    failureType: string;
+  };
+}

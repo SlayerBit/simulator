@@ -7,6 +7,7 @@ import { templatesRouter } from '../templates/router.js';
 import { schedulesRouter } from '../scheduling/router.js';
 import { dependenciesRouter } from '../dependencies/router.js';
 import { metricsRouter } from '../metrics/router.js';
+import { runbooksRouter } from '../runbooks/router.js';
 
 export const apiRouter = Router();
 
@@ -18,3 +19,4 @@ apiRouter.use('/templates', templatesRouter);
 apiRouter.use('/schedules', schedulesRouter);
 apiRouter.use('/dependencies', dependenciesRouter);
 apiRouter.use('/metrics', metricsRouter);
+apiRouter.use('/runbooks', runbooksRouter);

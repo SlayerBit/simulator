@@ -8,6 +8,7 @@ const items = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/simulations/new', label: 'New Simulation', icon: Zap },
   { href: '/history', label: 'History', icon: FileClock },
+  { href: '/runbooks', label: 'Runbooks', icon: FileText },
   { href: '/audit', label: 'Audit Log', icon: FileText },
   { href: '/templates', label: 'Templates', icon: Activity },
   { href: '/schedules', label: 'Schedules', icon: CalendarClock },

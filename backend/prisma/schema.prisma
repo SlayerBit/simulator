@@ -46,6 +46,7 @@ model Simulation {
   recoveryActions RecoveryAction[]
   reports         Report[]
   rollbackEntries RollbackEntry[]
+  runbooks        AgentRunbook[]
 }
 
 model SimulationStep {
@@ -172,4 +173,15 @@ model DependencyEdge {
   toService   String
   description String?
   createdAt   DateTime @default(now())
+}
+
+model AgentRunbook {
+  id           String     @id @default(cuid())
+  simulation   Simulation @relation(fields: [simulationId], references: [id], onDelete: Cascade)
+  simulationId String
+  incidentType String
+  severity     String
+  source       String     @default("agent1-live")
+  payload      Json
+  createdAt    DateTime   @default(now())
 }
