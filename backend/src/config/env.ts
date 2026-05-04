@@ -53,7 +53,8 @@ export function loadConfig(): AppConfig {
   const lokiUrl = process.env.LOKI_URL ?? null;
   const agent1AnalyzeUrl =
     process.env.AGENT1_ANALYZE_URL ?? 'http://agent1.agent-system.svc.cluster.local:8000/analyze/live';
-  const agent1AnalyzeDelayMs = Math.max(0, parseNumberEnv('AGENT1_ANALYZE_DELAY_MS', 10000));
+  // Keep this small: long delays push Agent 1 analysis past brief failure windows.
+  const agent1AnalyzeDelayMs = Math.max(0, parseNumberEnv('AGENT1_ANALYZE_DELAY_MS', 2000));
   const jwtSecret = process.env.JWT_SECRET;
   const simulatorNamespace = process.env.SIMULATOR_NAMESPACE || 'simulator';
   // Fix: Change line 43 to allow more namespaces or a broader default

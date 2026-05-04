@@ -29,17 +29,26 @@ export async function captureRunbookForSimulation(simulationId: string): Promise
   const prisma = getPrismaClient();
   const cfg = loadConfig();
 
+  const sim = await prisma.simulation.findUnique({ where: { id: simulationId } });
+  const durationSeconds = Math.max(0, sim?.durationSeconds ?? 0);
+  // Keep stabilization short so brief outages are still observed, but scale slightly with the hold window.
+  const stabilizationSeconds = Math.min(6, Math.max(0.5, durationSeconds * 0.12));
+  const maxDelayMs = Math.max(0, durationSeconds * 1000 - Math.round(stabilizationSeconds * 1000) - 250);
+  const effectiveDelayMs = Math.min(cfg.agent1AnalyzeDelayMs, maxDelayMs);
+
   await recordSimulationStep({
     simulationId,
     name: 'agent_analysis_scheduled',
     failureType: 'agent_analysis',
     stepType: 'execution',
-    phase: 'recovery',
+    phase: 'chaos',
     status: 'running',
-    message: `Agent 1 analysis scheduled in ${Math.round(cfg.agent1AnalyzeDelayMs / 1000)}s`,
+    message: `Agent 1 analysis scheduled in ${Math.round(effectiveDelayMs / 1000)}s (stabilization=${stabilizationSeconds.toFixed(
+      1,
+    )}s) for duration=${durationSeconds}s`,
   });
 
-  await sleep(cfg.agent1AnalyzeDelayMs);
+  await sleep(effectiveDelayMs);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 45000);
@@ -48,7 +57,7 @@ export async function captureRunbookForSimulation(simulationId: string): Promise
     const response = await fetch(cfg.agent1AnalyzeUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ stabilization_seconds: 10 }),
+      body: JSON.stringify({ stabilization_seconds: stabilizationSeconds }),
       signal: controller.signal,
     });
 

@@ -430,14 +430,12 @@ export async function runSimulation(simulationId: string): Promise<void> {
       data: { isRollbackable: true }
     });
 
-    // Fire-and-forget runbook capture after failure has been applied.
-    // This does not block simulation orchestration.
-    if (!sim.dryRun) {
-      scheduleRunbookCapture(simulationId);
-    }
-
     if (sim.manualRollback) {
       console.log(`[Simulator:${simulationId}] Simulation ${simulationId} is Manual Recovery mode. Skipping automatic rollback.`);
+      // Still capture a runbook while the failure is active (no hold window in manual mode).
+      if (!sim.dryRun) {
+        scheduleRunbookCapture(simulationId);
+      }
       await prisma.failureEvent.updateMany({
         where: { simulationId },
         data: { state: 'completed', endedAt: new Date() }
@@ -452,6 +450,12 @@ export async function runSimulation(simulationId: string): Promise<void> {
     // Hold chaos for the configured window unless apply() already ran the full duration (e.g. disruption loop).
     const holdMs = failureMethod.consumesSimulationDurationInApply ? 0 : sim.durationSeconds * 1000;
     await sleepOrAbort(holdMs);
+
+    // Capture runbooks AFTER we have held chaos for the configured duration, so Agent 1 observes the outage
+    // before automatic rollback begins.
+    if (!sim.dryRun) {
+      scheduleRunbookCapture(simulationId);
+    }
 
     // --- Phase: recovery — automatic rollback ---
     console.log(`[Simulator:${simulationId}] [Lifecycle] Automatic rollback start (${rollback.size} entries)`);
