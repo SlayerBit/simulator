@@ -147,4 +147,6 @@ export const api = {
   // Agent 2 observability
   getAgent2Logs: (token: string) =>
     request<{ logs: any[]; warning?: string }>('/api/agent2/logs', { method: 'GET', token }),
+  getNotifications: (token: string) =>
+    request<{ notifications: any[] }>('/api/notifications', { method: 'GET', token }),
 };

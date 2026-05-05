@@ -2,6 +2,7 @@ import './globals.css';
 import type { ReactNode } from 'react';
 import { ThemeProvider } from '@/components/providers/theme-provider';
 import { AuthProvider } from '@/components/providers/auth-provider';
+import { NotificationProvider } from '@/components/providers/notification-provider';
 
 export const metadata = {
   title: 'Cloud Failure Simulator',
@@ -23,7 +24,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body className="min-h-screen bg-background text-foreground antialiased selection:bg-primary/30">
         <AuthProvider>
           <ThemeProvider>
-            {children}
+            <NotificationProvider>{children}</NotificationProvider>
           </ThemeProvider>
         </AuthProvider>
       </body>

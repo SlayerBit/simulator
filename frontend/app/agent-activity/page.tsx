@@ -21,7 +21,15 @@ function statusVariant(status: string) {
 }
 
 function eventLabel(e: string) {
-  return e.replaceAll('_', ' ');
+  const map: Record<string, string> = {
+    runbook_received: 'Runbook Received',
+    runbook_parsed: 'Parsed Commands',
+    command_execution_started: 'Executing Command',
+    command_execution_success: 'Command Executed',
+    command_execution_failed: 'Command Failed',
+    runbook_completed: 'Execution Result',
+  };
+  return map[e] ?? e.replaceAll('_', ' ');
 }
 
 export default function AgentActivityPage() {
@@ -155,7 +163,7 @@ export default function AgentActivityPage() {
                           </div>
                         </div>
 
-                        {/* Command highlight */}
+                        {/* Parsed / executed kubectl command highlight */}
                         <div className="mt-3 flex items-start gap-2 rounded-lg border border-slate-800 bg-slate-950/50 p-2 text-[11px] font-mono text-slate-200">
                           <Code2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-indigo-400" />
                           <div className="break-all select-all">{l.command}</div>

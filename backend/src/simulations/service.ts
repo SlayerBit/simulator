@@ -137,6 +137,18 @@ export async function runSimulation(simulationId: string): Promise<void> {
     status: 'success',
     message: `simulation_started id=${simulationId}`,
   });
+  await prisma.auditLog.create({
+    data: {
+      userId: sim.createdById,
+      action: 'event.agent1_triggered',
+      simulationId,
+      metadata: {
+        type: 'agent1_triggered',
+        message: 'Agent 1 triggered for simulation analysis',
+        severity: 'info',
+      } as any,
+    },
+  });
 
   console.log(`[Simulator:${simulationId}] Starting simulation: ${simulationId} (type: ${sim.failureType})`);
   const rollback = new RollbackStack();

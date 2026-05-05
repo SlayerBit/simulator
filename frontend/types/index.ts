@@ -118,11 +118,31 @@ export interface Agent2LogEntry {
     | 'no_actions_found'
     | 'command_execution_started'
     | 'command_execution_success'
-    | 'command_execution_failed';
+    | 'command_execution_failed'
+    | 'runbook_completed';
   runbook_id: string;
   incident_type: string;
   action?: string | null;
   command: string;
   status: Agent2LogStatus;
   error?: string | null;
+}
+
+export interface UiNotification {
+  id: string;
+  type:
+    | 'agent1_triggered'
+    | 'runbook_generated'
+    | 'runbook_sent_redis'
+    | 'agent2_runbook_received'
+    | 'agent2_executed'
+    | 'recovery_successful'
+    | string;
+  title: string;
+  message: string;
+  timestamp: string;
+  status: 'info' | 'success' | 'warning' | 'error';
+  severity: 'info' | 'success' | 'warning' | 'error';
+  simulation_id?: string;
+  runbook_id?: string;
 }
