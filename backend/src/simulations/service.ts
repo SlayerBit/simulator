@@ -447,15 +447,15 @@ export async function runSimulation(simulationId: string): Promise<void> {
       return;
     }
 
-    // Hold chaos for the configured window unless apply() already ran the full duration (e.g. disruption loop).
-    const holdMs = failureMethod.consumesSimulationDurationInApply ? 0 : sim.durationSeconds * 1000;
-    await sleepOrAbort(holdMs);
-
-    // Capture runbooks AFTER we have held chaos for the configured duration, so Agent 1 observes the outage
-    // before automatic rollback begins.
+    // Capture runbooks shortly after apply while failure impact is still active.
+    // This avoids missing short but real outages (e.g. restart-based methods).
     if (!sim.dryRun) {
       scheduleRunbookCapture(simulationId);
     }
+
+    // Hold chaos for the configured window unless apply() already ran the full duration (e.g. disruption loop).
+    const holdMs = failureMethod.consumesSimulationDurationInApply ? 0 : sim.durationSeconds * 1000;
+    await sleepOrAbort(holdMs);
 
     // --- Phase: recovery — automatic rollback ---
     console.log(`[Simulator:${simulationId}] [Lifecycle] Automatic rollback start (${rollback.size} entries)`);

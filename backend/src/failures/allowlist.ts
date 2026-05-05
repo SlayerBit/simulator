@@ -7,13 +7,14 @@ import type { FailureType } from '../types/domain.js';
  */
 export const VISIBLE_FAILURE_METHOD_KEYS = [
   'pod_crash:delete-pods',
-  'pod_crash:restart-pods',
+  'pod_crash:scale-to-zero',
   'service_unavailability:scale-to-zero',
   'service_unavailability:scale-down',
   'network_failure:deny-ingress',
   'network_failure:deny-egress',
   'resource_pressure:reduce-memory-limits',
   'resource_pressure:update-cpu-resources',
+  'ingress_misrouting:scale-to-zero',
   'rollout_failure:restart-deployment',
   'rollout_failure:invalid-command',
 ] as const;

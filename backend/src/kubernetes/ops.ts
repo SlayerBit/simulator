@@ -410,22 +410,17 @@ export async function patchDeploymentTemplate(
   ref?: StepRef,
   signal?: AbortSignal
 ): Promise<void> {
-  const { apps } = getKubeClients();
   const ns = ensureNamespace(namespace);
   const start = Date.now();
 
   try {
-    const appsApi = apps as AppsV1Api;
     console.log(`[K8s Ops] Patching deployment ${deploymentName} in ${ns}...`);
-
-    // Fix: Pass headers in options instead of using custom client
-    const options: any = { headers: { 'Content-Type': patch.contentType } };
-    await withTimeout((appsApi as any).patchNamespacedDeployment({
-      name: deploymentName,
-      namespace: ns,
-      body: patch.body,
-      options
-    }), DEFAULT_TIMEOUT_MS, signal);
+    // Some managed clusters reject client-node patch headers inconsistently.
+    // Use a read-modify-replace flow for deterministic behavior across patch types.
+    const current = await readDeployment(ns, deploymentName, signal);
+    const currentJson = JSON.parse(JSON.stringify(current));
+    const merged = deepMergeObjects(currentJson, patch.body as any);
+    await replaceDeployment(ns, deploymentName, merged, undefined, signal);
     if (ref) {
       await recordSimulationStep({
         simulationId: ref.simulationId,
@@ -433,7 +428,7 @@ export async function patchDeploymentTemplate(
         failureType: ref.failureType,
         stepType: 'execution',
         status: 'success',
-        command: `kubectl patch deployment ${deploymentName} -n ${ns} --type merge --patch '...'`,
+        command: `kubectl replace deployment ${deploymentName} -n ${ns}`,
         message: 'Patched deployment successfully',
         resourceType: 'Deployment',
         resourceName: deploymentName,
@@ -449,7 +444,7 @@ export async function patchDeploymentTemplate(
         failureType: ref.failureType,
         stepType: 'execution',
         status: 'failed',
-        command: `kubectl patch deployment ${deploymentName} -n ${ns} --type merge --patch '...'`,
+        command: `kubectl replace deployment ${deploymentName} -n ${ns}`,
         error: e.message ?? String(e),
         resourceType: 'Deployment',
         resourceName: deploymentName,
@@ -459,6 +454,40 @@ export async function patchDeploymentTemplate(
     }
     throw e;
   }
+}
+
+function deepMergeObjects(base: any, patch: any): any {
+  if (patch == null || typeof patch !== 'object') return patch;
+  if (Array.isArray(patch)) {
+    if (!Array.isArray(base)) return patch;
+    // Strategic-ish merge for k8s lists keyed by `name` (e.g. containers/env).
+    const keyed = patch.every((x) => x && typeof x === 'object' && !Array.isArray(x) && typeof x.name === 'string');
+    if (!keyed) return patch;
+    const byName = new Map<string, any>();
+    for (const item of base) {
+      if (item && typeof item === 'object' && typeof item.name === 'string') {
+        byName.set(item.name, item);
+      }
+    }
+    const merged: any[] = [];
+    for (const p of patch) {
+      const cur = byName.get(p.name);
+      merged.push(cur ? deepMergeObjects(cur, p) : p);
+      byName.delete(p.name);
+    }
+    for (const remaining of byName.values()) merged.push(remaining);
+    return merged;
+  }
+  const out: any = Array.isArray(base) ? [...base] : { ...(base ?? {}) };
+  for (const [k, v] of Object.entries(patch)) {
+    const cur = out[k];
+    if (v != null && typeof v === 'object' && !Array.isArray(v) && cur != null && typeof cur === 'object' && !Array.isArray(cur)) {
+      out[k] = deepMergeObjects(cur, v);
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
 }
 
 export async function readNetworkPolicy(
