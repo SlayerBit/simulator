@@ -20,16 +20,16 @@ const VISIBLE_FAILURE_TYPES = [
   'network_failure',
   'resource_pressure',
   'rollout_failure',
+  'autoscaling_failure',
 ] as const;
 
 const METHODS_BY_FAILURE: Record<(typeof VISIBLE_FAILURE_TYPES)[number], { id: string; label: string }[]> = {
   pod_crash: [
     { id: 'delete-pods', label: 'Delete pods (sustained loop)' },
-    { id: 'restart-pods', label: 'Crash-loop (readiness fails)' },
   ],
   service_unavailability: [
     { id: 'scale-to-zero', label: 'Scale to zero' },
-    { id: 'scale-down', label: 'Scale down' },
+    { id: 'deny-ingress-netpol', label: 'Deny ingress (NetworkPolicy)' },
   ],
   network_failure: [
     { id: 'deny-ingress', label: 'Deny ingress' },
@@ -40,8 +40,11 @@ const METHODS_BY_FAILURE: Record<(typeof VISIBLE_FAILURE_TYPES)[number], { id: s
     { id: 'update-cpu-resources', label: 'Update CPU limits' },
   ],
   rollout_failure: [
-    { id: 'restart-deployment', label: 'Restart deployment' },
-    { id: 'invalid-command', label: 'Invalid command (exit 137)' },
+    { id: 'broken-image-rollout', label: 'Broken image rollout (ImagePullBackOff)' },
+  ],
+  autoscaling_failure: [
+    { id: 'scale-down', label: 'Scale down to one replica' },
+    { id: 'scale-to-zero', label: 'Scale to zero replicas' },
   ],
 };
 

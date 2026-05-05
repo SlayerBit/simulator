@@ -293,6 +293,12 @@ const CHAOS_NETPOL_UNMATCHABLE: Record<string, string> = {
   'chaos.simulator.io/unmatchable-peer': 'cf4d2c8e-6b84-4f9a-9c2b-000000000001',
 };
 
+const CHAOS_POLICY_NAMES = {
+  networkDenyIngress: 'chaos-deny-ingress',
+  networkDenyEgress: 'chaos-deny-egress',
+  serviceDenyIngress: 'chaos-service-deny-ingress',
+} as const;
+
 async function ok(message: string): Promise<FailureResult> {
   return { applied: true, message };
 }
@@ -650,13 +656,13 @@ const networkFailureDenyIngress: FailureMethod = {
     }
   },
   dryRunPlan: (p) => {
-    const name = npName(p.simulationId, 'deny-ing');
+    const name = CHAOS_POLICY_NAMES.networkDenyIngress;
     const sel = requireLabelSelector(p);
     return `upsert_networkpolicy: name=${name} namespace=${p.target.namespace} deny_ingress pods matchLabels=${sel} (dry-run; no API mutation)`;
   },
   apply: async (p) => {
     const selector = requireLabelSelector(p);
-    const name = npName(p.simulationId, 'deny-ing');
+    const name = CHAOS_POLICY_NAMES.networkDenyIngress;
     p.executionHints = { ...p.executionHints, networkPolicyName: name };
     const ref = { simulationId: p.simulationId, name: 'Deny Ingress', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would apply deny-ingress NetworkPolicy');
@@ -678,7 +684,7 @@ const networkFailureDenyIngress: FailureMethod = {
     return ok('Applied deny-ingress NetworkPolicy');
   },
   verifyApplied: async (p) => {
-    const name = p.executionHints?.networkPolicyName ?? npName(p.simulationId, 'deny-ing');
+    const name = p.executionHints?.networkPolicyName ?? CHAOS_POLICY_NAMES.networkDenyIngress;
     const pol = await readNetworkPolicy(p.target.namespace, name, p.signal);
     if (!pol) throw new Error(`Post-verify: NetworkPolicy ${name} not found`);
   },
@@ -701,13 +707,13 @@ const networkFailureDenyEgress: FailureMethod = {
     }
   },
   dryRunPlan: (p) => {
-    const name = npName(p.simulationId, 'deny-eg');
+    const name = CHAOS_POLICY_NAMES.networkDenyEgress;
     const sel = requireLabelSelector(p);
     return `upsert_networkpolicy: name=${name} namespace=${p.target.namespace} deny_egress pods matchLabels=${sel} (dry-run; no API mutation)`;
   },
   apply: async (p) => {
     const selector = requireLabelSelector(p);
-    const name = npName(p.simulationId, 'deny-eg');
+    const name = CHAOS_POLICY_NAMES.networkDenyEgress;
     p.executionHints = { ...p.executionHints, networkPolicyName: name };
     const ref = { simulationId: p.simulationId, name: 'Deny Egress', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would apply deny-egress NetworkPolicy');
@@ -729,7 +735,7 @@ const networkFailureDenyEgress: FailureMethod = {
     return ok('Applied deny-egress NetworkPolicy');
   },
   verifyApplied: async (p) => {
-    const name = p.executionHints?.networkPolicyName ?? npName(p.simulationId, 'deny-eg');
+    const name = p.executionHints?.networkPolicyName ?? CHAOS_POLICY_NAMES.networkDenyEgress;
     const pol = await readNetworkPolicy(p.target.namespace, name, p.signal);
     if (!pol) throw new Error(`Post-verify: NetworkPolicy ${name} not found`);
   },
@@ -755,7 +761,7 @@ const svcUnavailableNetpolDenyIngress: FailureMethod = {
   },
   apply: async (p) => {
     const selector = requireLabelSelector(p);
-    const name = npName(p.simulationId, 'deny-ing');
+    const name = CHAOS_POLICY_NAMES.serviceDenyIngress;
     const ref = { simulationId: p.simulationId, name: 'Deny Ingress', failureType: p.failureType };
     if (p.dryRun) return ok('Dry-run: would apply deny-ingress NetworkPolicy');
     await snapshotNetworkPolicy(p, name);
@@ -2467,6 +2473,12 @@ const resourcePressureReduceMemoryLimits: FailureMethod = {
     if (p.dryRun) return ok('Dry-run: would patch resources.limits.memory');
     const dep = requireDeployment(p);
     const cname = await resolveMainContainerName(p.target.namespace, dep);
+    const current = await readDeployment(p.target.namespace, dep, p.signal);
+    const currentContainer = current?.spec?.template?.spec?.containers?.find((x: any) => x.name === cname);
+    const currentImage = currentContainer?.image;
+    if (!currentImage) {
+      throw new Error(`Cannot resolve current image for deployment "${dep}" container "${cname}"`);
+    }
     await snapshotDeployment(p, dep);
     if (p.executionHints?.injectedBaselineResources) {
       await patchDeploymentTemplate(p.target.namespace, dep, {
@@ -2478,6 +2490,7 @@ const resourcePressureReduceMemoryLimits: FailureMethod = {
                 containers: [
                   {
                     name: cname,
+                    image: currentImage,
                     resources: { limits: { cpu: BASELINE_LIMIT_CPU, memory: BASELINE_LIMIT_MEM } },
                   },
                 ],
@@ -2493,7 +2506,7 @@ const resourcePressureReduceMemoryLimits: FailureMethod = {
         spec: {
           template: {
             spec: {
-              containers: [{ name: cname, resources: { limits: { memory: '64Mi' } } }],
+              containers: [{ name: cname, image: currentImage, resources: { limits: { memory: '64Mi' } } }],
             },
           },
         },
@@ -2556,6 +2569,12 @@ const resourcePressureUpdateCpuResources: FailureMethod = {
     if (p.dryRun) return ok('Dry-run: would patch resources.limits.cpu');
     const dep = requireDeployment(p);
     const cname = await resolveMainContainerName(p.target.namespace, dep);
+    const current = await readDeployment(p.target.namespace, dep, p.signal);
+    const currentContainer = current?.spec?.template?.spec?.containers?.find((x: any) => x.name === cname);
+    const currentImage = currentContainer?.image;
+    if (!currentImage) {
+      throw new Error(`Cannot resolve current image for deployment "${dep}" container "${cname}"`);
+    }
     const mc = Math.max(20, Math.min(500, 550 - (p.intensityPercent ?? 70) * 5));
     const targetLimit = `${mc}m`;
     p.executionHints = { ...p.executionHints, expectedCpuLimit: targetLimit };
@@ -2570,6 +2589,7 @@ const resourcePressureUpdateCpuResources: FailureMethod = {
                 containers: [
                   {
                     name: cname,
+                    image: currentImage,
                     resources: { limits: { cpu: BASELINE_LIMIT_CPU, memory: BASELINE_LIMIT_MEM } },
                   },
                 ],
@@ -2585,7 +2605,7 @@ const resourcePressureUpdateCpuResources: FailureMethod = {
         spec: {
           template: {
             spec: {
-              containers: [{ name: cname, resources: { limits: { cpu: targetLimit } } }],
+              containers: [{ name: cname, image: currentImage, resources: { limits: { cpu: targetLimit } } }],
             },
           },
         },
@@ -2657,9 +2677,9 @@ const rolloutFailureRestartDeployment: FailureMethod = {
   rollback: async () => { },
 };
 
-const rolloutFailureInvalidCommand: FailureMethod = {
-  id: 'invalid-command',
-  title: 'Patch container command to exit 137 (restore via deployment snapshot / revision chain)',
+const rolloutFailureBrokenImage: FailureMethod = {
+  id: 'broken-image-rollout',
+  title: 'Patch container image to invalid tag (ImagePullBackOff; recoverable via rollback)',
   supports: 'rollout_failure',
   requirements: { requiresNamespace: true, requiresDeployment: true, requiresDuration: true },
   validate: async (p) => {
@@ -2673,14 +2693,14 @@ const rolloutFailureInvalidCommand: FailureMethod = {
     }
   },
   dryRunPlan: (p) =>
-    `replace_deployment: ${requireDeployment(p)} set command=[sh,-c,exit 137] (full object replace; rollback=exact snapshot; dry-run; no API mutation)`,
+    `patch_deployment: ${requireDeployment(p)} set image=invalid.local/chaos/nonexistent:broken (dry-run; rollback via previous ReplicaSet)`,
   apply: async (p) => {
-    const ref = { simulationId: p.simulationId, name: 'Invalid Command', failureType: p.failureType };
-    if (p.dryRun) return ok('Dry-run: would replace deployment with failing command');
+    const ref = { simulationId: p.simulationId, name: 'Broken Image Rollout', failureType: p.failureType };
+    if (p.dryRun) return ok('Dry-run: would patch deployment image to an invalid value');
     const dep = requireDeployment(p);
     const cname = await resolveMainContainerName(p.target.namespace, dep);
     await snapshotDeployment(p, dep);
-    
+
     await patchDeploymentTemplate(p.target.namespace, dep, {
       contentType: 'application/strategic-merge-patch+json',
       body: {
@@ -2690,7 +2710,7 @@ const rolloutFailureInvalidCommand: FailureMethod = {
               containers: [
                 {
                   name: cname,
-                  command: ['sh', '-c', 'exit 137'],
+                  image: 'invalid.local/chaos/nonexistent:broken',
                 },
               ],
             },
@@ -2698,18 +2718,17 @@ const rolloutFailureInvalidCommand: FailureMethod = {
         },
       },
     }, ref, p.signal);
-    
-    return ok('Patched deployment container with failing command (recoverable via snapshot rollback)');
+
+    return ok('Patched deployment container image to invalid value (expected ImagePullBackOff)');
   },
   verifyApplied: async (p) => {
     const dep = requireDeployment(p);
     const cname = await resolveMainContainerName(p.target.namespace, dep);
     const cur = await readDeployment(p.target.namespace, dep, p.signal);
     const cont = cur?.spec?.template?.spec?.containers?.find((x: any) => x.name === cname);
-    const cmd = cont?.command;
-    const cmdStr = Array.isArray(cmd) ? cmd.join(' ') : '';
-    if (!cmdStr.includes('exit 137')) {
-      throw new Error(`Post-verify: expected failing command with exit 137, got ${JSON.stringify(cmd)}`);
+    const image = String(cont?.image ?? '');
+    if (!image.includes('invalid.local/chaos/nonexistent:broken')) {
+      throw new Error(`Post-verify: expected invalid image marker, got ${image || 'nil'}`);
     }
   },
   rollback: async () => { },
@@ -2789,7 +2808,7 @@ export function registerAllFailureMethods(): void {
 
     // rollout_failure (production allowlist category)
     rolloutFailureRestartDeployment,
-    rolloutFailureInvalidCommand,
+    rolloutFailureBrokenImage,
 
     // autoscaling_failure
     autoscalingScaleZero,
