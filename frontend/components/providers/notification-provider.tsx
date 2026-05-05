@@ -18,6 +18,45 @@ const NotificationContext = createContext<Ctx>({
   markAllRead: () => {},
 });
 
+const NOTIFICATION_WATERMARK_KEY = 'simulator.notifications.watermark.v1';
+
+type Watermark = { ts: number; id: string };
+
+function toMs(ts: string): number {
+  const n = +new Date(ts);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function compareNotificationsDesc(a: UiNotification, b: UiNotification): number {
+  const bTs = toMs(b.timestamp);
+  const aTs = toMs(a.timestamp);
+  if (bTs !== aTs) return bTs - aTs;
+  return b.id.localeCompare(a.id);
+}
+
+function readWatermark(): Watermark | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(NOTIFICATION_WATERMARK_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<Watermark>;
+    if (typeof parsed.ts !== 'number' || typeof parsed.id !== 'string') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveWatermark(wm: Watermark) {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(NOTIFICATION_WATERMARK_KEY, JSON.stringify(wm));
+}
+
+function isNewerThanWatermark(n: UiNotification, wm: Watermark): boolean {
+  const ts = toMs(n.timestamp);
+  return ts > wm.ts || (ts === wm.ts && n.id > wm.id);
+}
+
 function routeFor(n: UiNotification): string | null {
   if (n.type === 'agent1_triggered' && n.simulation_id) return `/simulations/${n.simulation_id}`;
   if ((n.type === 'runbook_generated' || n.type === 'runbook_sent_redis') && n.runbook_id) return `/runbooks/${n.runbook_id}`;
@@ -32,7 +71,9 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
   const [notifications, setNotifications] = useState<UiNotification[]>([]);
   const [readIds, setReadIds] = useState<Set<string>>(new Set());
   const [toasts, setToasts] = useState<UiNotification[]>([]);
-  const known = useRef<Set<string>>(new Set());
+  const bootstrapped = useRef(false);
+  const toastedIds = useRef<Set<string>>(new Set());
+  const watermark = useRef<Watermark | null>(null);
 
   useEffect(() => {
     if (!token) return;
@@ -41,16 +82,45 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       try {
         const res = await api.getNotifications(token);
         if (!alive) return;
-        const rows = (res.notifications ?? []) as UiNotification[];
+        const rows = ((res.notifications ?? []) as UiNotification[]).slice().sort(compareNotificationsDesc);
         setNotifications(rows);
-        const fresh = rows.filter((n) => !known.current.has(n.id)).slice(0, 4);
+
+        if (!bootstrapped.current) {
+          watermark.current = readWatermark();
+          if (!watermark.current && rows.length > 0) {
+            const newest = rows[0];
+            watermark.current = { ts: toMs(newest.timestamp), id: newest.id };
+            saveWatermark(watermark.current);
+          }
+          bootstrapped.current = true;
+        }
+
+        const wm = watermark.current;
+        const fresh = wm
+          ? rows.filter((n) => isNewerThanWatermark(n, wm) && !toastedIds.current.has(n.id)).slice(0, 4)
+          : [];
         if (fresh.length > 0) {
-          setToasts((prev) => [...fresh, ...prev].slice(0, 5));
-          for (const n of fresh) {
-            known.current.add(n.id);
+          const chronologicallySortedFresh = fresh.slice().sort((a, b) => {
+            const aTs = toMs(a.timestamp);
+            const bTs = toMs(b.timestamp);
+            if (aTs !== bTs) return aTs - bTs;
+            return a.id.localeCompare(b.id);
+          });
+          setToasts((prev) => [...chronologicallySortedFresh, ...prev].slice(0, 5));
+          for (const n of chronologicallySortedFresh) {
+            toastedIds.current.add(n.id);
             setTimeout(() => {
               setToasts((prev) => prev.filter((x) => x.id !== n.id));
             }, 5000);
+          }
+        }
+
+        if (rows.length > 0) {
+          const newest = rows[0];
+          const nextWm = { ts: toMs(newest.timestamp), id: newest.id };
+          if (!watermark.current || isNewerThanWatermark(newest, watermark.current)) {
+            watermark.current = nextWm;
+            saveWatermark(nextWm);
           }
         }
       } catch {}

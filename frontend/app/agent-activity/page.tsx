@@ -13,6 +13,16 @@ import { api } from '@/services/api';
 import { cn } from '@/lib/utils';
 import type { Agent2LogEntry } from '@/types';
 
+const EVENT_ORDER: Record<Agent2LogEntry['event'], number> = {
+  runbook_received: 10,
+  runbook_parsed: 20,
+  no_actions_found: 25,
+  command_execution_started: 30,
+  command_execution_success: 40,
+  command_execution_failed: 40,
+  runbook_completed: 50,
+};
+
 function statusVariant(status: string) {
   const s = status.toLowerCase();
   if (s === 'success') return 'success';
@@ -40,8 +50,15 @@ export default function AgentActivityPage() {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
 
   const grouped = useMemo(() => {
-    // Already newest-first from the API; keep as-is.
-    return logs;
+    // Timeline is oldest -> newest so flow reads naturally.
+    return logs.slice().sort((a, b) => {
+      const aTs = +new Date(a.timestamp);
+      const bTs = +new Date(b.timestamp);
+      if (aTs !== bTs) return aTs - bTs;
+      const aOrder = EVENT_ORDER[a.event] ?? 999;
+      const bOrder = EVENT_ORDER[b.event] ?? 999;
+      return aOrder - bOrder;
+    });
   }, [logs]);
 
   async function load() {

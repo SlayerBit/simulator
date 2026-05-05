@@ -16,6 +16,15 @@ type UiNotification = {
   runbook_id?: string;
 };
 
+const STAGE_ORDER: Record<string, number> = {
+  agent1_triggered: 10,
+  runbook_generated: 20,
+  runbook_sent_redis: 30,
+  agent2_runbook_received: 40,
+  agent2_executed: 50,
+  recovery_successful: 60,
+};
+
 const EVENT_META: Record<string, { type: string; title: string; status: UiNotification['status'] }> = {
   'event.agent1_triggered': { type: 'agent1_triggered', title: 'Agent 1 triggered', status: 'info' },
   'event.runbook_generated': { type: 'runbook_generated', title: 'Runbook generated', status: 'success' },
@@ -23,6 +32,18 @@ const EVENT_META: Record<string, { type: string; title: string; status: UiNotifi
 };
 
 export const notificationsRouter = Router();
+
+function toMs(value: unknown): number {
+  const n = +new Date(String(value ?? ''));
+  return Number.isFinite(n) ? n : Date.now();
+}
+
+function makeAgent2Id(log: any, event: string, ts: string, idx: number): string {
+  const runbookId = String(log?.runbook_id ?? '').trim();
+  const command = String(log?.command ?? '').trim().slice(0, 120);
+  const action = String(log?.action ?? '').trim();
+  return `agent2-${runbookId || 'na'}-${event}-${ts}-${action}-${command}-${idx}`;
+}
 
 async function fetchAgent2Logs(): Promise<any[]> {
   const cfg = loadConfig();
@@ -67,7 +88,8 @@ notificationsRouter.get('/', authMiddleware(['admin', 'engineer', 'viewer']), as
     if (runbookId) simByRunbook.set(runbookId, rb.simulationId);
   }
 
-  const notif: UiNotification[] = [];
+  const notif: Array<UiNotification & { _ts: number; _stage: number; _sourceIdx: number }> = [];
+  let sourceIdx = 0;
 
   for (const a of auditLogs) {
     const meta = EVENT_META[a.action];
@@ -81,12 +103,16 @@ notificationsRouter.get('/', authMiddleware(['admin', 'engineer', 'viewer']), as
       timestamp: a.createdAt.toISOString(),
       status: meta.status,
       severity: meta.status,
+      _ts: +a.createdAt,
+      _stage: STAGE_ORDER[meta.type] ?? 999,
+      _sourceIdx: sourceIdx++,
       ...(a.simulationId ? { simulation_id: a.simulationId } : {}),
       ...(md.runbook_id ? { runbook_id: String(md.runbook_id) } : {}),
     });
   }
 
-  for (const l of agent2Logs) {
+  for (let i = 0; i < agent2Logs.length; i++) {
+    const l = agent2Logs[i];
     const event = String(l?.event ?? '');
     let mapped: { type: string; title: string; status: UiNotification['status'] } | null = null;
     if (event === 'runbook_received') mapped = { type: 'agent2_runbook_received', title: 'Agent 2 received runbook', status: 'info' };
@@ -96,20 +122,32 @@ notificationsRouter.get('/', authMiddleware(['admin', 'engineer', 'viewer']), as
       mapped = { type: 'recovery_successful', title: 'Recovery successful', status: 'success' };
     if (!mapped) continue;
     const runbookId = String(l?.runbook_id ?? '').trim();
+    const ts = new Date(toMs(l?.timestamp)).toISOString();
     notif.push({
-      id: `agent2-${event}-${l?.timestamp ?? Math.random()}`,
+      id: makeAgent2Id(l, event, ts, i),
       type: mapped.type,
       title: mapped.title,
       message: String(l?.command ?? mapped.title),
-      timestamp: String(l?.timestamp ?? new Date().toISOString()),
+      timestamp: ts,
       status: mapped.status,
       severity: mapped.status,
+      _ts: toMs(ts),
+      _stage: STAGE_ORDER[mapped.type] ?? 999,
+      _sourceIdx: sourceIdx++,
       ...(runbookId ? { runbook_id: runbookId } : {}),
       ...(runbookId && simByRunbook.get(runbookId) ? { simulation_id: simByRunbook.get(runbookId)! } : {}),
     });
   }
 
-  notif.sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp));
-  res.json({ notifications: notif.slice(0, 100) });
+  // Keep response newest-first, with deterministic tie-breaking by pipeline stage.
+  notif.sort((a, b) => {
+    if (b._ts !== a._ts) return b._ts - a._ts;
+    if (a._stage !== b._stage) return a._stage - b._stage;
+    if (a._sourceIdx !== b._sourceIdx) return a._sourceIdx - b._sourceIdx;
+    return a.id.localeCompare(b.id);
+  });
+
+  const out: UiNotification[] = notif.slice(0, 100).map(({ _ts, _stage, _sourceIdx, ...rest }) => rest);
+  res.json({ notifications: out });
 });
 
