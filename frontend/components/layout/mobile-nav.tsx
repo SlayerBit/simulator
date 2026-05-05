@@ -21,10 +21,13 @@ const items = [
   { href: '/grafana', label: 'Observability', icon: Shield },
 ];
 
+const HIDDEN_NAV_LABELS = new Set(['Schedules', 'Dependencies', 'Observability']);
+
 export function MobileNav() {
   const [open, setOpen] = useState(false);
   const pathname = usePathname();
   const router = useRouter();
+  const visibleItems = items.filter((item) => !HIDDEN_NAV_LABELS.has(item.label));
 
   return (
     <div className="md:hidden">
@@ -46,7 +49,7 @@ export function MobileNav() {
           </div>
           
           <nav className="flex-1 overflow-y-auto px-4 py-6 space-y-2">
-            {items.map((item) => {
+            {visibleItems.map((item) => {
               const active = pathname === item.href || (item.href !== '/dashboard' && pathname.startsWith(item.href));
               return (
                 <button
