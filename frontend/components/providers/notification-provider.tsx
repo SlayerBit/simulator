@@ -18,9 +18,9 @@ const NotificationContext = createContext<Ctx>({
   markAllRead: () => {},
 });
 
-const NOTIFICATION_WATERMARK_KEY = 'simulator.notifications.watermark.v1';
+const NOTIFICATION_WATERMARK_KEY = 'simulator.notifications.watermark.v2';
 
-type Watermark = { ts: number; id: string };
+type Watermark = { maxTs: number; seenIdsAtMaxTs: string[] };
 
 function toMs(ts: string): number {
   const n = +new Date(ts);
@@ -40,8 +40,10 @@ function readWatermark(): Watermark | null {
     const raw = localStorage.getItem(NOTIFICATION_WATERMARK_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<Watermark>;
-    if (typeof parsed.ts !== 'number' || typeof parsed.id !== 'string') return null;
-    return parsed;
+    if (typeof parsed.maxTs === 'number' && Array.isArray(parsed.seenIdsAtMaxTs)) {
+      return { maxTs: parsed.maxTs, seenIdsAtMaxTs: parsed.seenIdsAtMaxTs.filter((v): v is string => typeof v === 'string') };
+    }
+    return null;
   } catch {
     return null;
   }
@@ -54,7 +56,25 @@ function saveWatermark(wm: Watermark) {
 
 function isNewerThanWatermark(n: UiNotification, wm: Watermark): boolean {
   const ts = toMs(n.timestamp);
-  return ts > wm.ts || (ts === wm.ts && n.id > wm.id);
+  if (ts > wm.maxTs) return true;
+  if (ts < wm.maxTs) return false;
+  return !wm.seenIdsAtMaxTs.includes(n.id);
+}
+
+function watermarkFromRows(rows: UiNotification[]): Watermark | null {
+  if (rows.length === 0) return null;
+  const maxTs = toMs(rows[0].timestamp);
+  const seenIdsAtMaxTs = rows.filter((n) => toMs(n.timestamp) === maxTs).map((n) => n.id);
+  return { maxTs, seenIdsAtMaxTs };
+}
+
+function mergeWatermarkWithRows(current: Watermark, rows: UiNotification[]): Watermark {
+  const snapshot = watermarkFromRows(rows);
+  if (!snapshot) return current;
+  if (snapshot.maxTs > current.maxTs) return snapshot;
+  if (snapshot.maxTs < current.maxTs) return current;
+  const merged = new Set<string>([...current.seenIdsAtMaxTs, ...snapshot.seenIdsAtMaxTs]);
+  return { maxTs: current.maxTs, seenIdsAtMaxTs: Array.from(merged) };
 }
 
 function routeFor(n: UiNotification): string | null {
@@ -86,13 +106,14 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
         setNotifications(rows);
 
         if (!bootstrapped.current) {
-          watermark.current = readWatermark();
-          if (!watermark.current && rows.length > 0) {
-            const newest = rows[0];
-            watermark.current = { ts: toMs(newest.timestamp), id: newest.id };
-            saveWatermark(watermark.current);
-          }
+          const stored = readWatermark();
+          const snapshot = watermarkFromRows(rows);
+          if (!stored) watermark.current = snapshot;
+          else if (!snapshot) watermark.current = stored;
+          else watermark.current = snapshot.maxTs >= stored.maxTs ? snapshot : stored;
+          if (watermark.current) saveWatermark(watermark.current);
           bootstrapped.current = true;
+          return;
         }
 
         const wm = watermark.current;
@@ -115,12 +136,20 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
           }
         }
 
-        if (rows.length > 0) {
-          const newest = rows[0];
-          const nextWm = { ts: toMs(newest.timestamp), id: newest.id };
-          if (!watermark.current || isNewerThanWatermark(newest, watermark.current)) {
-            watermark.current = nextWm;
-            saveWatermark(nextWm);
+        if (watermark.current) {
+          const merged = mergeWatermarkWithRows(watermark.current, rows);
+          if (
+            merged.maxTs !== watermark.current.maxTs ||
+            merged.seenIdsAtMaxTs.length !== watermark.current.seenIdsAtMaxTs.length
+          ) {
+            watermark.current = merged;
+            saveWatermark(merged);
+          }
+        } else {
+          const snapshot = watermarkFromRows(rows);
+          if (snapshot) {
+            watermark.current = snapshot;
+            saveWatermark(snapshot);
           }
         }
       } catch {}
