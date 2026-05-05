@@ -62,9 +62,15 @@ function isNewerThanWatermark(n: UiNotification, wm: Watermark): boolean {
 }
 
 function watermarkFromRows(rows: UiNotification[]): Watermark | null {
-  if (rows.length === 0) return null;
-  const maxTs = toMs(rows[0].timestamp);
-  const seenIdsAtMaxTs = rows.filter((n) => toMs(n.timestamp) === maxTs).map((n) => n.id);
+  const firstValid = rows.find((row) => typeof row.timestamp === 'string' && toMs(row.timestamp) > 0);
+  if (!firstValid) return null;
+
+  const maxTs = toMs(firstValid.timestamp);
+  const seenIdsAtMaxTs = rows
+    .filter((row) => typeof row.timestamp === 'string' && toMs(row.timestamp) === maxTs)
+    .map((row) => row.id)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+
   return { maxTs, seenIdsAtMaxTs };
 }
 
